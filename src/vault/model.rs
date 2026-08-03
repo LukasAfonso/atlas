@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NoteId(pub PathBuf);
@@ -74,6 +70,7 @@ pub struct NoteRecord {
     pub relative_path: PathBuf,
     pub title: String,
     pub markdown_body: String,
+    #[expect(dead_code, reason = "aliases are indexed now for future navigation UI")]
     pub aliases: Vec<String>,
     pub tags: Vec<String>,
     pub references: Vec<NoteId>,
@@ -91,13 +88,6 @@ pub struct VaultIndex {
 }
 
 impl VaultIndex {
-    pub fn note_titles(&self) -> HashMap<NoteId, &str> {
-        self.notes
-            .iter()
-            .map(|note| (note.id.clone(), note.title.as_str()))
-            .collect()
-    }
-
     pub fn reference_count(&self) -> usize {
         self.notes.iter().map(|note| note.references.len()).sum()
     }

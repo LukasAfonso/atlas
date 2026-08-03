@@ -105,7 +105,7 @@ mod tests {
 
         let result = scan_vault(directory.path().to_path_buf());
         assert_eq!(result.index.notes.len(), 1);
-        assert_eq!(result.index.notes[0].title, "Visible");
+        assert_eq!(result.index.notes[0].title, "visible");
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
 
         let result = scan_vault(directory.path().to_path_buf());
         assert_eq!(result.index.notes.len(), 1);
-        assert_eq!(result.index.notes[0].title, "Included");
+        assert_eq!(result.index.notes[0].title, "included");
     }
 
     #[cfg(unix)]

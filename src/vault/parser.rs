@@ -1,13 +1,12 @@
 use std::{collections::HashSet, ops::Range, path::Path};
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use serde::Deserialize;
 
 use super::{Diagnostic, ParsedNote, ReferenceKind, ReferenceTarget};
 
 #[derive(Debug, Default, Deserialize)]
 struct Frontmatter {
-    title: Option<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
     tags: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
@@ -64,9 +63,6 @@ pub fn parse_note(root: &Path, path: &Path, source: &str) -> ParsedNote {
                 }
             });
 
-    let mut first_h1 = None;
-    let mut h1_text = String::new();
-    let mut in_h1 = false;
     let mut code_block_start = None;
     let mut code_ranges = Vec::new();
     let mut references = Vec::new();
@@ -74,38 +70,18 @@ pub fn parse_note(root: &Path, path: &Path, source: &str) -> ParsedNote {
     let parser = Parser::new_ext(split.body, Options::ENABLE_STRIKETHROUGH).into_offset_iter();
     for (event, range) in parser {
         match event {
-            Event::Start(Tag::Heading {
-                level: HeadingLevel::H1,
-                ..
-            }) if first_h1.is_none() => {
-                in_h1 = true;
-                h1_text.clear();
-            }
-            Event::End(TagEnd::Heading(HeadingLevel::H1)) if in_h1 => {
-                let title = h1_text.trim();
-                if !title.is_empty() {
-                    first_h1 = Some(title.to_owned());
-                }
-                in_h1 = false;
-            }
             Event::Start(Tag::CodeBlock(_)) => code_block_start = Some(range.start),
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(start) = code_block_start.take() {
                     code_ranges.push(start..range.end);
                 }
             }
-            Event::Code(code) => {
-                if in_h1 {
-                    h1_text.push_str(&code);
-                }
-                code_ranges.push(range);
-            }
+            Event::Code(_) => code_ranges.push(range),
             Event::Start(Tag::Link { dest_url, .. }) if code_block_start.is_none() => {
                 if let Some(target) = markdown_reference(&dest_url) {
                     references.push(target);
                 }
             }
-            Event::Text(text) if code_block_start.is_none() && in_h1 => h1_text.push_str(&text),
             _ => {}
         }
     }
@@ -121,21 +97,12 @@ pub fn parse_note(root: &Path, path: &Path, source: &str) -> ParsedNote {
         citations.extend(scan_citations(segment));
     }
 
-    let fallback_title = relative_path
+    let title = relative_path
         .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Untitled")
         .to_owned();
-
-    let title = frontmatter
-        .as_ref()
-        .and_then(|frontmatter| frontmatter.title.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned)
-        .or(first_h1)
-        .unwrap_or(fallback_title);
 
     let aliases = deduplicate_strings(
         frontmatter
@@ -403,12 +370,12 @@ mod tests {
     }
 
     #[test]
-    fn title_precedence_is_frontmatter_then_h1_then_filename() {
+    fn title_is_always_the_filename_without_the_markdown_extension() {
         assert_eq!(
             parse("file.md", "---\ntitle: Frontmatter\n---\n# Heading").title,
-            "Frontmatter"
+            "file"
         );
-        assert_eq!(parse("file.md", "# Heading").title, "Heading");
+        assert_eq!(parse("Nested Note.MD", "# Heading").title, "Nested Note");
         assert_eq!(parse("file.md", "Body").title, "file");
     }
 
@@ -474,11 +441,11 @@ mod tests {
     #[test]
     fn malformed_and_unclosed_frontmatter_fall_back_without_panicking() {
         let malformed = parse("fallback.md", "---\ntitle: [broken\n---\n# Body title");
-        assert_eq!(malformed.title, "Body title");
+        assert_eq!(malformed.title, "fallback");
         assert_eq!(malformed.diagnostics.len(), 1);
 
         let unclosed = parse("fallback.md", "---\ntitle: Never closes\n# Body title");
-        assert_eq!(unclosed.title, "Body title");
+        assert_eq!(unclosed.title, "fallback");
         assert_eq!(unclosed.diagnostics.len(), 1);
     }
 

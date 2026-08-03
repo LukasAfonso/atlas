@@ -1,9 +1,4 @@
-mod app;
-mod board;
-mod markdown;
-mod vault;
-
-use app::AtlasApp;
+use atlas::app::AtlasApp;
 use eframe::egui;
 
 fn main() -> eframe::Result {

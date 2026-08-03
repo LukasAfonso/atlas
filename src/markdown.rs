@@ -8,14 +8,13 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::vault::{NoteId, NoteRecord};
 
-const CARD_EXCERPT_CHARS: usize = 4_096;
 pub const CARD_BODY_FONT_WORLD: f32 = 3.7;
-pub const CARD_BODY_WIDTH_WORLD: f32 = 202.0;
-const CARD_SCALE_STEPS: f32 = 16.0;
+const CARD_SCALE_STEPS: f32 = 64.0;
+const CARD_WRAP_RATIO_STEPS: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum CacheLayout {
-    CardScale { scale: u16, full_body: bool },
+    Card { scale: u16, wrap_ratio: u32 },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -29,7 +28,6 @@ struct LayoutSpec {
     cache_layout: CacheLayout,
     wrap_width: f32,
     base_font_size: f32,
-    excerpt_only: bool,
 }
 
 #[derive(Debug, Default)]
@@ -49,22 +47,23 @@ impl MarkdownCache {
         painter: &egui::Painter,
         note: &NoteRecord,
         scale: f32,
-        full_body: bool,
+        wrap_width: f32,
         pixels_per_point: f32,
     ) -> Arc<Galley> {
         let scale_bucket = card_scale_bucket(scale);
+        let wrap_ratio_bucket = card_wrap_ratio_bucket(wrap_width, scale);
         let layout_scale = f32::from(scale_bucket) / CARD_SCALE_STEPS;
+        let layout_wrap_ratio = wrap_ratio_bucket as f32 / CARD_WRAP_RATIO_STEPS;
         self.galley(
             painter,
             note,
             LayoutSpec {
-                cache_layout: CacheLayout::CardScale {
+                cache_layout: CacheLayout::Card {
                     scale: scale_bucket,
-                    full_body,
+                    wrap_ratio: wrap_ratio_bucket,
                 },
-                wrap_width: CARD_BODY_WIDTH_WORLD * layout_scale,
+                wrap_width: layout_wrap_ratio * layout_scale,
                 base_font_size: CARD_BODY_FONT_WORLD * layout_scale,
-                excerpt_only: !full_body,
             },
             pixels_per_point,
         )
@@ -92,13 +91,7 @@ impl MarkdownCache {
         }
 
         let body = without_duplicate_title(&note.markdown_body, &note.title);
-        let markdown = if spec.excerpt_only {
-            excerpt(body, CARD_EXCERPT_CHARS)
-        } else {
-            body
-        };
-        let galley =
-            painter.layout_job(markdown_job(markdown, spec.wrap_width, spec.base_font_size));
+        let galley = painter.layout_job(markdown_job(body, spec.wrap_width, spec.base_font_size));
         self.galleys.insert(key, Arc::clone(&galley));
         galley
     }
@@ -110,11 +103,11 @@ fn card_scale_bucket(scale: f32) -> u16 {
         .clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
-fn excerpt(source: &str, max_chars: usize) -> &str {
-    source
-        .char_indices()
-        .nth(max_chars)
-        .map_or(source, |(end, _)| &source[..end])
+fn card_wrap_ratio_bucket(width: f32, scale: f32) -> u32 {
+    let safe_scale = scale.max(1.0 / CARD_SCALE_STEPS);
+    ((width.max(1.0) / safe_scale) * CARD_WRAP_RATIO_STEPS)
+        .round()
+        .clamp(1.0, u32::MAX as f32) as u32
 }
 
 fn without_duplicate_title<'a>(markdown: &'a str, title: &str) -> &'a str {
@@ -314,27 +307,18 @@ fn ensure_block_break(job: &mut LayoutJob, format: TextFormat) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_BODY_FONT_WORLD, CARD_BODY_WIDTH_WORLD, CARD_SCALE_STEPS, card_scale_bucket, excerpt,
-        markdown_job, without_duplicate_title,
+        CARD_SCALE_STEPS, card_scale_bucket, card_wrap_ratio_bucket, markdown_job,
+        without_duplicate_title,
     };
-
-    #[test]
-    fn card_excerpt_stops_on_a_character_boundary() {
-        assert_eq!(excerpt("aé日z", 3), "aé日");
-        assert_eq!(excerpt("short", 20), "short");
-    }
 
     #[test]
     fn cache_layouts_are_quantized() {
         assert_eq!(card_scale_bucket(1.0), CARD_SCALE_STEPS as u16);
-        assert_eq!(card_scale_bucket(1.03), CARD_SCALE_STEPS as u16);
-    }
-
-    #[test]
-    fn zoom_preserves_the_markdown_width_to_font_ratio() {
-        let at_one = CARD_BODY_WIDTH_WORLD / CARD_BODY_FONT_WORLD;
-        let at_four = (CARD_BODY_WIDTH_WORLD * 4.0) / (CARD_BODY_FONT_WORLD * 4.0);
-        assert!((at_one - at_four).abs() < f32::EPSILON);
+        assert_eq!(card_scale_bucket(1.003), CARD_SCALE_STEPS as u16);
+        assert_eq!(
+            card_wrap_ratio_bucket(400.0, 1.0),
+            card_wrap_ratio_bucket(800.0, 2.0)
+        );
     }
 
     #[test]

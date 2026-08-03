@@ -1,73 +1,26 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, TryRecvError},
-    },
-    thread,
-    time::Duration,
 };
 
-use eframe::egui::{self, Color32, RichText};
-use serde::{Deserialize, Serialize};
+use eframe::egui::{self, Color32, RichText, Stroke};
+mod jobs;
+mod registry;
+
+use jobs::{FolderPickerJob, ScanJob};
+use registry::PersistedState;
 
 use crate::board::BoardState;
-use crate::vault::{
-    Diagnostic, DiagnosticSeverity, NoteId, NoteRecord, VaultIndex, VaultScanResult, scan_vault,
-};
+use crate::theme;
+use crate::vault::{DiagnosticSeverity, NoteId, VaultIndex};
 
 const SETTINGS_KEY: &str = "atlas.settings.v1";
-const NOTE_ROW_HEIGHT: f32 = 70.0;
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct PersistedState {
-    vaults: Vec<PathBuf>,
-}
-
-impl PersistedState {
-    fn register(&mut self, path: PathBuf) -> bool {
-        if self.vaults.iter().any(|existing| existing == &path) {
-            false
-        } else {
-            self.vaults.push(path);
-            self.vaults.sort_by_key(|path| path_key(path));
-            true
-        }
-    }
-
-    fn forget(&mut self, path: &Path) -> bool {
-        let original_len = self.vaults.len();
-        self.vaults.retain(|existing| existing != path);
-        self.vaults.len() != original_len
-    }
-
-    fn deduplicate(&mut self) {
-        self.vaults.sort_by_key(|path| path_key(path));
-        self.vaults.dedup();
-    }
-}
 
 #[derive(Debug)]
 enum AppScreen {
     VaultList,
     Scanning { root: PathBuf, generation: u64 },
     Vault { index: VaultIndex },
-}
-
-struct ScanEnvelope {
-    generation: u64,
-    result: VaultScanResult,
-}
-
-struct ScanJob {
-    receiver: Receiver<ScanEnvelope>,
-    cancelled: Arc<AtomicBool>,
-}
-
-struct FolderPickerJob {
-    receiver: Receiver<Option<PathBuf>>,
 }
 
 #[derive(Debug)]
@@ -100,11 +53,7 @@ impl AtlasApp {
             .unwrap_or_default();
         persisted.deduplicate();
 
-        let mut visuals = egui::Visuals::light();
-        visuals.panel_fill = Color32::from_rgb(246, 246, 242);
-        visuals.window_fill = Color32::from_rgb(250, 249, 245);
-        visuals.selection.bg_fill = Color32::from_rgb(79, 116, 99);
-        creation_context.egui_ctx.set_visuals(visuals);
+        theme::apply(&creation_context.egui_ctx);
 
         Self {
             persisted,
@@ -115,144 +64,6 @@ impl AtlasApp {
             board: BoardState::default(),
             selected_note: None,
             notice: None,
-        }
-    }
-
-    fn start_scan(&mut self, root: PathBuf, context: &egui::Context) {
-        self.cancel_running_scan();
-        self.scan_generation = self.scan_generation.wrapping_add(1);
-        let generation = self.scan_generation;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let (sender, receiver) = mpsc::channel();
-        let worker_context = context.clone();
-        let worker_root = root.clone();
-
-        thread::spawn(move || {
-            let result = scan_vault(worker_root);
-            if !worker_cancelled.load(Ordering::Acquire) {
-                let _ = sender.send(ScanEnvelope { generation, result });
-                worker_context.request_repaint();
-            }
-        });
-
-        self.selected_note = None;
-        self.scan_job = Some(ScanJob {
-            receiver,
-            cancelled,
-        });
-        self.screen = AppScreen::Scanning { root, generation };
-    }
-
-    fn cancel_running_scan(&mut self) {
-        if let Some(job) = self.scan_job.take() {
-            job.cancelled.store(true, Ordering::Release);
-        }
-    }
-
-    fn cancel_scan(&mut self) {
-        self.cancel_running_scan();
-        self.scan_generation = self.scan_generation.wrapping_add(1);
-        self.screen = AppScreen::VaultList;
-    }
-
-    fn poll_scan(&mut self, context: &egui::Context) {
-        let message = self.scan_job.as_ref().map(|job| job.receiver.try_recv());
-
-        match message {
-            Some(Ok(envelope)) => {
-                self.scan_job = None;
-                if is_current_generation(self.scan_generation, envelope.generation) {
-                    self.board.rebuild(&envelope.result.index);
-                    self.screen = AppScreen::Vault {
-                        index: envelope.result.index,
-                    };
-                    self.selected_note = None;
-                }
-            }
-            Some(Err(TryRecvError::Disconnected)) => {
-                self.scan_job = None;
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    "The vault scan stopped unexpectedly".to_owned(),
-                ));
-                self.screen = AppScreen::VaultList;
-            }
-            Some(Err(TryRecvError::Empty)) => {
-                context.request_repaint_after(Duration::from_millis(50));
-            }
-            None => {}
-        }
-    }
-
-    fn start_folder_picker(&mut self, context: &egui::Context) {
-        if self.folder_picker_job.is_some() {
-            return;
-        }
-
-        let (sender, receiver) = mpsc::channel();
-        let worker_context = context.clone();
-        thread::spawn(move || {
-            let selected = pollster::block_on(
-                rfd::AsyncFileDialog::new()
-                    .set_title("Add Markdown vault")
-                    .pick_folder(),
-            )
-            .map(|handle| handle.path().to_path_buf());
-            let _ = sender.send(selected);
-            worker_context.request_repaint();
-        });
-        self.folder_picker_job = Some(FolderPickerJob { receiver });
-        self.notice = Some((
-            DiagnosticSeverity::Warning,
-            "Waiting for folder selection…".to_owned(),
-        ));
-        context.request_repaint_after(Duration::from_millis(50));
-    }
-
-    fn poll_folder_picker(&mut self, context: &egui::Context) {
-        let message = self
-            .folder_picker_job
-            .as_ref()
-            .map(|job| job.receiver.try_recv());
-
-        match message {
-            Some(Ok(selected)) => {
-                self.folder_picker_job = None;
-                self.accept_selected_vault(selected, context);
-            }
-            Some(Err(TryRecvError::Disconnected)) => {
-                self.folder_picker_job = None;
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    "The folder picker stopped unexpectedly".to_owned(),
-                ));
-            }
-            Some(Err(TryRecvError::Empty)) => {
-                context.request_repaint_after(Duration::from_millis(50));
-            }
-            None => {}
-        }
-    }
-
-    fn accept_selected_vault(&mut self, selected: Option<PathBuf>, context: &egui::Context) {
-        let Some(selected) = selected else {
-            self.notice = None;
-            return;
-        };
-
-        match fs::canonicalize(&selected) {
-            Ok(path) => {
-                self.persisted.register(path.clone());
-                self.notice = None;
-                self.start_scan(path, context);
-            }
-            Err(error) => {
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    format!("Could not add {}: {error}", selected.display()),
-                ));
-            }
         }
     }
 
@@ -285,17 +96,17 @@ impl AtlasApp {
 
     fn render_vault_list(&self, ui: &mut egui::Ui) -> Vec<UiAction> {
         let mut actions = Vec::new();
-        ui.add_space(12.0);
+        ui.add_space(18.0);
         ui.horizontal(|ui| {
-            ui.heading("Atlas");
+            render_brand(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
                         self.folder_picker_job.is_none(),
-                        egui::Button::new(if self.folder_picker_job.is_some() {
+                        primary_button(if self.folder_picker_job.is_some() {
                             "Choosing…"
                         } else {
-                            "Add vault"
+                            "+ Add vault"
                         }),
                     )
                     .clicked()
@@ -304,46 +115,69 @@ impl AtlasApp {
                 }
             });
         });
-        ui.label("Your Markdown vaults");
-        ui.add_space(12.0);
+        ui.add_space(32.0);
+        ui.label(RichText::new("Markdown vaults").size(20.0).strong());
+        ui.label(
+            RichText::new("Choose a research workspace to open on the Atlas board.")
+                .color(theme::MUTED),
+        );
+        ui.add_space(16.0);
 
         if self.persisted.vaults.is_empty() {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_min_height(120.0);
+            surface_frame().show(ui, |ui| {
+                ui.set_min_height(150.0);
                 ui.vertical_centered(|ui| {
-                    ui.add_space(25.0);
-                    ui.strong("No vaults yet");
-                    ui.label("Add a folder containing Markdown notes to begin.");
+                    ui.add_space(32.0);
+                    ui.label(RichText::new("No vaults yet").size(17.0).strong());
+                    ui.label(
+                        RichText::new("Add a folder containing Markdown notes to begin.")
+                            .color(theme::MUTED),
+                    );
                 });
             });
         } else {
             for path in &self.persisted.vaults {
                 let accessible = fs::read_dir(path).is_ok();
-                egui::Frame::group(ui.style()).show(ui, |ui| {
+                surface_frame().show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        egui::Frame::new()
+                            .fill(if accessible {
+                                theme::SAGE_SOFT
+                            } else {
+                                Color32::from_rgb(239, 224, 220)
+                            })
+                            .corner_radius(10)
+                            .inner_margin(10)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("V").size(16.0).strong().color(
+                                    if accessible {
+                                        theme::SAGE_DARK
+                                    } else {
+                                        theme::ERROR
+                                    },
+                                ));
+                            });
                         ui.vertical(|ui| {
-                            ui.strong(vault_name(path));
-                            ui.label(RichText::new(path.display().to_string()).small().weak());
+                            ui.label(RichText::new(vault_name(path)).size(15.0).strong());
+                            ui.label(
+                                RichText::new(path.display().to_string())
+                                    .small()
+                                    .color(theme::MUTED),
+                            );
                             if accessible {
-                                ui.label(
-                                    RichText::new("Available")
-                                        .small()
-                                        .color(Color32::DARK_GREEN),
-                                );
+                                ui.label(RichText::new("●  Available").small().color(theme::SAGE));
                             } else {
                                 ui.label(
-                                    RichText::new("Unavailable")
-                                        .small()
-                                        .color(Color32::DARK_RED),
+                                    RichText::new("●  Unavailable").small().color(theme::ERROR),
                                 );
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Forget").clicked() {
+                            if ui.add(quiet_button("Forget")).clicked() {
                                 actions.push(UiAction::ForgetVault(path.clone()));
                             }
                             if ui
-                                .add_enabled(accessible, egui::Button::new("Open"))
+                                .add_enabled(accessible, egui::Button::new("Open").corner_radius(9))
                                 .clicked()
                             {
                                 actions.push(UiAction::OpenVault(path.clone()));
@@ -351,7 +185,7 @@ impl AtlasApp {
                         });
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(9.0);
             }
         }
         actions
@@ -360,15 +194,24 @@ impl AtlasApp {
     fn render_scanning(&self, ui: &mut egui::Ui, root: &Path, generation: u64) -> Vec<UiAction> {
         let mut actions = Vec::new();
         ui.centered_and_justified(|ui| {
-            ui.vertical_centered(|ui| {
-                ui.spinner();
-                ui.heading("Scanning vault");
-                ui.label(root.display().to_string());
-                ui.label(RichText::new(format!("Scan {generation}")).small().weak());
-                ui.add_space(12.0);
-                if ui.button("Cancel").clicked() {
-                    actions.push(UiAction::CancelScan);
-                }
+            surface_frame().show(ui, |ui| {
+                ui.set_min_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(14.0);
+                    ui.spinner();
+                    ui.label(RichText::new("Scanning vault").size(20.0).strong());
+                    ui.label(RichText::new(root.display().to_string()).color(theme::MUTED));
+                    ui.label(
+                        RichText::new(format!("INDEX PASS {generation}"))
+                            .size(10.0)
+                            .color(theme::MUTED),
+                    );
+                    ui.add_space(12.0);
+                    if ui.add(quiet_button("Cancel")).clicked() {
+                        actions.push(UiAction::CancelScan);
+                    }
+                    ui.add_space(8.0);
+                });
             });
         });
         actions
@@ -382,37 +225,64 @@ impl AtlasApp {
     ) -> Vec<UiAction> {
         let mut actions = Vec::new();
 
-        ui.horizontal(|ui| {
-            if ui.button("← Vaults").clicked() {
-                actions.push(UiAction::BackToVaults);
-            }
-            if ui.button("Rescan").clicked() {
-                actions.push(UiAction::Rescan(index.root.clone()));
-            }
-            if ui.button("Fit").clicked() {
-                board.request_fit();
-            }
-            if ui.selectable_label(board.debug_open, "Debug").clicked() {
-                board.debug_open = !board.debug_open;
-            }
-            ui.separator();
-            ui.heading(vault_name(&index.root));
-            ui.separator();
-            ui.label(RichText::new("Pan by dragging anywhere.").small().weak());
-            let zoom_hint = if cfg!(target_os = "linux") {
-                "Ctrl+wheel to zoom."
-            } else {
-                "Pinch or Ctrl+wheel to zoom."
-            };
-            ui.label(RichText::new(zoom_hint).small().weak());
+        surface_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                egui::Frame::new()
+                    .fill(theme::SAGE_DARK)
+                    .corner_radius(9)
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("A").strong().color(Color32::WHITE));
+                    });
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
+                    ui.label(
+                        RichText::new(index.root.display().to_string())
+                            .small()
+                            .color(theme::MUTED),
+                    );
+                    let (warnings, errors) = index.diagnostic_counts();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  {:.0} ms",
+                            index.notes.len(),
+                            index.reference_count(),
+                            index.backlink_count(),
+                            index.unique_citation_count(),
+                            warnings + errors,
+                            index.scan_duration.as_secs_f64() * 1_000.0,
+                        ))
+                        .size(10.0)
+                        .color(theme::MUTED),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(quiet_button("← Vaults")).clicked() {
+                        actions.push(UiAction::BackToVaults);
+                    }
+                    if ui.add(quiet_button("Rescan")).clicked() {
+                        actions.push(UiAction::Rescan(index.root.clone()));
+                    }
+                    if ui.add(quiet_button("Fit board")).clicked() {
+                        board.request_fit();
+                    }
+                });
+            });
         });
-        ui.separator();
+        ui.add_space(8.0);
 
         if index.notes.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("This vault has no Markdown notes");
-                    ui.label("Add a .md file and rescan when you are ready.");
+                    ui.label(
+                        RichText::new("This vault has no Markdown notes")
+                            .size(20.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new("Add a .md file and rescan when you are ready.")
+                            .color(theme::MUTED),
+                    );
                 });
             });
         } else {
@@ -422,22 +292,6 @@ impl AtlasApp {
             }
         }
 
-        if board.debug_open {
-            let mut open = true;
-            let mut debug_selection = None;
-            egui::Window::new("Vault diagnostics")
-                .id(egui::Id::new("vault-diagnostics"))
-                .open(&mut open)
-                .default_width(560.0)
-                .default_height(620.0)
-                .show(ui.ctx(), |ui| {
-                    debug_selection = render_debug_view(ui, index, selected_note);
-                });
-            board.debug_open = open;
-            if let Some(note_id) = debug_selection {
-                actions.push(UiAction::SetSelection(Some(note_id)));
-            }
-        }
         actions
     }
 }
@@ -453,11 +307,18 @@ impl eframe::App for AtlasApp {
             .show(ui, |ui| {
                 if let Some((severity, message)) = &self.notice {
                     let color = match severity {
-                        DiagnosticSeverity::Warning => Color32::from_rgb(145, 99, 38),
-                        DiagnosticSeverity::Error => Color32::DARK_RED,
+                        DiagnosticSeverity::Warning => theme::AMBER,
+                        DiagnosticSeverity::Error => theme::ERROR,
                     };
-                    ui.label(RichText::new(message).color(color));
-                    ui.separator();
+                    egui::Frame::new()
+                        .fill(theme::PAPER)
+                        .stroke(Stroke::new(1.0, color))
+                        .corner_radius(8)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(message).color(color));
+                        });
+                    ui.add_space(8.0);
                 }
 
                 match &self.screen {
@@ -488,162 +349,6 @@ impl Drop for AtlasApp {
     }
 }
 
-fn render_debug_view(
-    ui: &mut egui::Ui,
-    index: &VaultIndex,
-    selected_note: Option<&NoteId>,
-) -> Option<NoteId> {
-    let (warnings, errors) = index.diagnostic_counts();
-    ui.label(
-        RichText::new(index.root.display().to_string())
-            .small()
-            .weak(),
-    );
-    ui.horizontal_wrapped(|ui| {
-        metric(ui, "Notes", index.notes.len());
-        metric(ui, "References", index.reference_count());
-        metric(ui, "Backlinks", index.backlink_count());
-        metric(ui, "Citations", index.unique_citation_count());
-        metric(ui, "Warnings", warnings);
-        metric(ui, "Errors", errors);
-        ui.label(
-            RichText::new(format!(
-                "{:.1} ms",
-                index.scan_duration.as_secs_f64() * 1_000.0
-            ))
-            .small()
-            .weak(),
-        );
-    });
-    ui.separator();
-
-    if !index.diagnostics.is_empty() {
-        egui::CollapsingHeader::new(format!("Scan diagnostics ({})", index.diagnostics.len()))
-            .default_open(true)
-            .show(ui, |ui| {
-                for diagnostic in &index.diagnostics {
-                    diagnostic_label(ui, diagnostic);
-                }
-            });
-        ui.separator();
-    }
-
-    if let Some(selected) =
-        selected_note.and_then(|selected| index.notes.iter().find(|note| &note.id == selected))
-    {
-        render_note_details(ui, selected, index);
-        ui.separator();
-    }
-
-    let mut selection = None;
-    egui::ScrollArea::vertical()
-        .id_salt("vault-debug-note-list")
-        .auto_shrink([false, false])
-        .show_rows(ui, NOTE_ROW_HEIGHT, index.notes.len(), |ui, row_range| {
-            for row in row_range {
-                let note = &index.notes[row];
-                let is_selected = selected_note == Some(&note.id);
-                if ui
-                    .selectable_label(is_selected, RichText::new(&note.title).strong().size(15.0))
-                    .clicked()
-                {
-                    selection = Some(note.id.clone());
-                }
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new(note.relative_path.display().to_string())
-                            .small()
-                            .weak(),
-                    );
-                    for tag in &note.tags {
-                        ui.label(
-                            RichText::new(format!("#{tag}"))
-                                .small()
-                                .color(Color32::from_rgb(78, 111, 96)),
-                        );
-                    }
-                });
-                ui.label(
-                    RichText::new(format!(
-                        "{} references · {} backlinks · {} citations · {} diagnostics",
-                        note.references.len(),
-                        note.backlinks.len(),
-                        note.citations.len(),
-                        note.diagnostics.len()
-                    ))
-                    .small(),
-                );
-                ui.separator();
-            }
-        });
-    selection
-}
-
-fn render_note_details(ui: &mut egui::Ui, note: &NoteRecord, index: &VaultIndex) {
-    let titles = index.note_titles();
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.strong(&note.title);
-            ui.label(RichText::new(note.id.display()).small().weak());
-        });
-        if !note.aliases.is_empty() {
-            ui.label(format!("Aliases: {}", note.aliases.join(", ")));
-        }
-        relationship_label(ui, "References", &note.references, &titles);
-        relationship_label(ui, "Backlinks", &note.backlinks, &titles);
-        if !note.citations.is_empty() {
-            ui.label(format!("Citations: @{}", note.citations.join(", @")));
-        }
-        for diagnostic in &note.diagnostics {
-            diagnostic_label(ui, diagnostic);
-        }
-    });
-}
-
-fn relationship_label(
-    ui: &mut egui::Ui,
-    label: &str,
-    ids: &[NoteId],
-    titles: &std::collections::HashMap<NoteId, &str>,
-) {
-    if ids.is_empty() {
-        return;
-    }
-    let values = ids
-        .iter()
-        .map(|id| {
-            titles
-                .get(id)
-                .map(|title| (*title).to_owned())
-                .unwrap_or_else(|| id.display())
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    ui.label(format!("{label}: {values}"));
-}
-
-fn diagnostic_label(ui: &mut egui::Ui, diagnostic: &Diagnostic) {
-    let color = match diagnostic.severity {
-        DiagnosticSeverity::Warning => Color32::from_rgb(145, 99, 38),
-        DiagnosticSeverity::Error => Color32::DARK_RED,
-    };
-    let path = diagnostic
-        .path
-        .as_ref()
-        .map(|path| format!("{}: ", path.display()))
-        .unwrap_or_default();
-    ui.label(
-        RichText::new(format!("{path}{}", diagnostic.message))
-            .small()
-            .color(color),
-    );
-}
-
-fn metric(ui: &mut egui::Ui, label: &str, value: usize) {
-    ui.label(RichText::new(format!("{value} {label}")).small());
-    ui.separator();
-}
-
 fn vault_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -652,56 +357,46 @@ fn vault_name(path: &Path) -> String {
         .to_owned()
 }
 
-fn path_key(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/").to_lowercase()
+fn render_brand(ui: &mut egui::Ui) {
+    surface_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            egui::Frame::new()
+                .fill(theme::SAGE_DARK)
+                .corner_radius(10)
+                .inner_margin(9)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("A").size(18.0).strong().color(Color32::WHITE));
+                });
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Atlas").size(16.0).strong());
+                ui.label(
+                    RichText::new("RESEARCH WORKSPACE")
+                        .size(9.0)
+                        .color(theme::MUTED),
+                );
+            });
+        });
+    });
 }
 
-fn is_current_generation(active: u64, incoming: u64) -> bool {
-    active == incoming
+fn surface_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(14)
+        .inner_margin(12)
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
+fn primary_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
+        .fill(theme::SAGE_DARK)
+        .stroke(Stroke::new(1.0, theme::SAGE_DARK))
+        .corner_radius(10)
+}
 
-    use tempfile::tempdir;
-
-    use super::{PersistedState, is_current_generation};
-
-    #[test]
-    fn vault_registry_deduplicates_paths() {
-        let directory = tempdir().unwrap();
-        let path = fs::canonicalize(directory.path()).unwrap();
-        let mut state = PersistedState::default();
-        assert!(state.register(path.clone()));
-        assert!(!state.register(path));
-        assert_eq!(state.vaults.len(), 1);
-    }
-
-    #[test]
-    fn forgetting_a_vault_does_not_delete_it() {
-        let directory = tempdir().unwrap();
-        let path = fs::canonicalize(directory.path()).unwrap();
-        let mut state = PersistedState::default();
-        state.register(path.clone());
-        assert!(state.forget(&path));
-        assert!(path.exists());
-        assert!(state.vaults.is_empty());
-    }
-
-    #[test]
-    fn superseded_scan_generations_are_rejected() {
-        assert!(is_current_generation(4, 4));
-        assert!(!is_current_generation(5, 4));
-    }
-
-    #[test]
-    fn persisted_registry_round_trips() {
-        let state = PersistedState {
-            vaults: vec!["/vault/one".into(), "/vault/two".into()],
-        };
-        let yaml = serde_yaml_ng::to_string(&state).unwrap();
-        let restored: PersistedState = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(restored.vaults, state.vaults);
-    }
+fn quiet_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(label)
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(9)
 }
