@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use eframe::egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 
 use super::{
-    CARD_SIZE, Camera, DetailLevel, FADE_START_THRESHOLD, ISOLATION_THRESHOLD,
+    CARD_SIZE, Camera, DetailLevel, FADE_START_THRESHOLD, GRID_SPACING, ISOLATION_THRESHOLD,
     READABLE_TITLE_FONT_SIZE, SNAP_MAGNET_THRESHOLD, SNAP_THRESHOLD, body_typography_scale,
-    body_visible, card_width_ratio, detail_level, font_sizes, grid_layout, magnetized_note_rect,
-    note_body_rect, note_footer_visible, note_padding, note_title_position, note_typography_scale,
-    note_viewport_coverage, related_note_ids, resolved_edges, snap_magnet_progress,
-    title_card_size, toggled_selection, unrelated_opacity,
+    body_visible, card_width_ratio, clustered_layout, detail_level, font_sizes,
+    magnetized_note_rect, note_body_rect, note_footer_visible, note_padding, note_title_position,
+    note_typography_scale, note_viewport_coverage, related_note_ids, resolved_edges,
+    snap_magnet_progress, title_card_size, toggled_selection, unrelated_opacity,
 };
 use crate::markdown::CARD_BODY_FONT_WORLD;
 use crate::theme;
@@ -27,6 +27,21 @@ fn note(name: &str) -> NoteRecord {
         backlinks: Vec::new(),
         citations: Vec::new(),
         diagnostics: Vec::new(),
+    }
+}
+
+fn tagged_note(name: &str, tags: &[&str]) -> NoteRecord {
+    let mut note = note(name);
+    note.tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+    note
+}
+
+fn index(notes: Vec<NoteRecord>) -> VaultIndex {
+    VaultIndex {
+        root: PathBuf::from("/vault"),
+        notes,
+        diagnostics: Vec::new(),
+        scan_duration: std::time::Duration::ZERO,
     }
 }
 
@@ -76,15 +91,159 @@ fn consecutive_drag_frames_accumulate() {
 }
 
 #[test]
-fn grid_layout_is_deterministic_and_non_overlapping() {
-    let notes = [note("A"), note("B"), note("C"), note("D")];
-    let first = grid_layout(&notes);
-    let second = grid_layout(&notes);
-    assert_eq!(first, second);
-    let values: Vec<_> = first.values().collect();
+fn clustered_layout_is_rescan_stable_and_non_overlapping() {
+    let notes = vec![
+        tagged_note("A", &["methods"]),
+        tagged_note("B", &["evidence"]),
+        tagged_note("C", &["methods", "evidence"]),
+        note("D"),
+    ];
+    let mut reversed = notes.clone();
+    reversed.reverse();
+    let first = clustered_layout(&index(notes));
+    let second = clustered_layout(&index(reversed));
+    assert_eq!(first.positions, second.positions);
+    assert_eq!(first.clusters, second.clusters);
+    let values: Vec<_> = first.positions.values().collect();
     for (index, left) in values.iter().enumerate() {
         for right in values.iter().skip(index + 1) {
-            assert!((**left - **right).length() >= 168.0);
+            let distance = (**left - **right).abs();
+            assert!(distance.x >= GRID_SPACING.x || distance.y >= GRID_SPACING.y);
+        }
+    }
+    assert_eq!(
+        first
+            .clusters
+            .iter()
+            .map(|cluster| cluster.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Untagged", "evidence", "methods"]
+    );
+}
+
+#[test]
+fn independent_cluster_regions_do_not_overlap() {
+    let layout = clustered_layout(&index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+    ]));
+    let alpha = layout
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == "alpha")
+        .expect("alpha cluster");
+    let beta = layout
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == "beta")
+        .expect("beta cluster");
+
+    assert!(!alpha.bounds.intersects(beta.bounds));
+}
+
+#[test]
+fn same_tag_notes_fill_a_compact_grid_before_expanding() {
+    let notes = (0..9)
+        .map(|index| tagged_note(&format!("Note {index}"), &["cluster"]))
+        .collect();
+    let layout = clustered_layout(&index(notes));
+    let slots: Vec<_> = layout
+        .positions
+        .values()
+        .map(|position| {
+            (
+                (position.x / GRID_SPACING.x).round() as i32,
+                (position.y / GRID_SPACING.y).round() as i32,
+            )
+        })
+        .collect();
+    let min_x = slots.iter().map(|slot| slot.0).min().expect("x slot");
+    let max_x = slots.iter().map(|slot| slot.0).max().expect("x slot");
+    let min_y = slots.iter().map(|slot| slot.1).min().expect("y slot");
+    let max_y = slots.iter().map(|slot| slot.1).max().expect("y slot");
+
+    assert_eq!(max_x - min_x, 2);
+    assert_eq!(max_y - min_y, 2);
+}
+
+#[test]
+fn multi_tag_notes_are_positioned_between_cluster_centers() {
+    let layout = clustered_layout(&index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+        tagged_note("Bridge", &["alpha", "beta"]),
+    ]));
+    let alpha = layout
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == "alpha")
+        .expect("alpha cluster");
+    let beta = layout
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == "beta")
+        .expect("beta cluster");
+    let bridge = layout.positions[&NoteId(PathBuf::from("Bridge.md"))];
+    let minimum_x = alpha.center.x.min(beta.center.x);
+    let maximum_x = alpha.center.x.max(beta.center.x);
+
+    assert!(bridge.x >= minimum_x && bridge.x <= maximum_x);
+    assert!(alpha.bounds.contains(bridge));
+    assert!(beta.bounds.contains(bridge));
+    assert!(alpha.bounds.intersects(beta.bounds));
+}
+
+#[test]
+fn relationships_pull_notes_toward_each_other_before_slotting() {
+    let left = tagged_note("Left", &["alpha"]);
+    let right = tagged_note("Right", &["beta"]);
+    let unrelated = clustered_layout(&index(vec![left.clone(), right.clone()]));
+
+    let mut linked_left = left;
+    let mut linked_right = right;
+    linked_left.references.push(linked_right.id.clone());
+    linked_right.backlinks.push(linked_left.id.clone());
+    let linked = clustered_layout(&index(vec![linked_left, linked_right]));
+    let left_id = NoteId(PathBuf::from("Left.md"));
+    let right_id = NoteId(PathBuf::from("Right.md"));
+
+    assert!(
+        linked.positions[&left_id].distance(linked.positions[&right_id])
+            < unrelated.positions[&left_id].distance(unrelated.positions[&right_id])
+    );
+}
+
+#[test]
+fn clustered_notes_do_not_overlap_at_any_natural_zoom_level() {
+    let notes = (0..18)
+        .map(|index| {
+            if index % 3 == 0 {
+                tagged_note(&format!("Bridge {index}"), &["alpha", "beta"])
+            } else if index % 2 == 0 {
+                tagged_note(&format!("Alpha {index}"), &["alpha"])
+            } else {
+                tagged_note(&format!("Beta {index}"), &["beta"])
+            }
+        })
+        .collect();
+    let layout = clustered_layout(&index(notes));
+
+    for scale in [0.10, 0.28, 0.50, 0.74, 1.0, 4.0] {
+        let level = detail_level(scale);
+        let size = match level {
+            DetailLevel::Markers => Vec2::splat(14.0),
+            DetailLevel::Titles => title_card_size(scale),
+            DetailLevel::Content => super::content_card_size(scale),
+        };
+        let rects: Vec<_> = layout
+            .positions
+            .values()
+            .map(|position| Rect::from_center_size(Pos2::ZERO + position.to_vec2() * scale, size))
+            .collect();
+        for (index, left) in rects.iter().enumerate() {
+            for right in rects.iter().skip(index + 1) {
+                assert!(!left.intersects(*right), "notes overlap at scale {scale}");
+            }
         }
     }
 }
@@ -164,14 +323,8 @@ fn resolved_edge_geometry_is_cached_from_note_ids() {
     let mut source = note("Source");
     let target = note("Target");
     source.references.push(target.id.clone());
-    let notes = vec![source, target];
-    let positions = grid_layout(&notes);
-    let index = VaultIndex {
-        root: PathBuf::from("/vault"),
-        notes,
-        diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
-    };
+    let index = index(vec![source, target]);
+    let positions = clustered_layout(&index).positions;
     let edges = resolved_edges(&index, &positions);
     assert_eq!(edges.len(), 1);
     assert_eq!(

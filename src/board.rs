@@ -10,7 +10,7 @@ use crate::markdown::{CARD_BODY_FONT_WORLD, MarkdownCache};
 use crate::theme;
 use crate::vault::{NoteId, NoteRecord, VaultIndex};
 use inspector::paint_relationship_panel;
-use layout::{BoardEdge, grid_layout, layout_bounds, resolved_edges};
+use layout::{BoardEdge, ClusterRegion, clustered_layout, layout_bounds, resolved_edges};
 use render::{NotePaintOptions, note_padding};
 #[cfg(test)]
 use render::{
@@ -18,7 +18,7 @@ use render::{
 };
 
 const CARD_SIZE: Vec2 = Vec2::new(230.0, 112.0);
-const GRID_SPACING: Vec2 = Vec2::new(520.0, 240.0);
+const GRID_SPACING: Vec2 = Vec2::new(470.0, 195.0);
 const MIN_SCALE: f32 = 0.08;
 const MAX_SCALE: f32 = 32.0;
 const MARKER_THRESHOLD: f32 = 0.28;
@@ -84,6 +84,7 @@ impl Camera {
 pub struct BoardState {
     pub camera: Camera,
     positions: HashMap<NoteId, Pos2>,
+    clusters: Vec<ClusterRegion>,
     edges: Vec<BoardEdge>,
     content_bounds: Option<Rect>,
     needs_fit: bool,
@@ -100,6 +101,7 @@ impl Default for BoardState {
         Self {
             camera: Camera::default(),
             positions: HashMap::new(),
+            clusters: Vec::new(),
             edges: Vec::new(),
             content_bounds: None,
             needs_fit: true,
@@ -120,9 +122,11 @@ pub struct BoardOutput {
 
 impl BoardState {
     pub fn rebuild(&mut self, index: &VaultIndex) {
-        self.positions = grid_layout(&index.notes);
+        let layout = clustered_layout(index);
+        self.positions = layout.positions;
+        self.clusters = layout.clusters;
         self.edges = resolved_edges(index, &self.positions);
-        self.content_bounds = layout_bounds(&self.positions);
+        self.content_bounds = layout_bounds(&self.positions, &self.clusters);
         self.camera = Camera::default();
         self.needs_fit = true;
         self.click_origin = None;
@@ -329,6 +333,7 @@ impl BoardState {
 
         painter.rect_filled(viewport, 0.0, theme::CANVAS);
         self.paint_grid(&painter, viewport);
+        self.paint_cluster_regions(&painter, viewport);
         self.paint_edges(
             &painter,
             viewport,
@@ -347,6 +352,14 @@ impl BoardState {
                 continue;
             };
             let natural_rect = self.note_screen_rect(world_position, viewport, level);
+            if focal_state
+                .as_ref()
+                .is_some_and(|(focal, focal_rect, _, _, _)| {
+                    focal.id != note.id && focal_rect.intersects(natural_rect)
+                })
+            {
+                continue;
+            }
             let rect = if focal_state
                 .as_ref()
                 .is_some_and(|(focal, _, _, _, _)| focal.id == note.id)

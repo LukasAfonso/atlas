@@ -42,6 +42,63 @@ impl BoardState {
         }
     }
 
+    pub(super) fn paint_cluster_regions(&self, painter: &eframe::egui::Painter, viewport: Rect) {
+        for cluster in &self.clusters {
+            let bounds = Rect::from_min_max(
+                self.camera.world_to_screen(cluster.bounds.min, viewport),
+                self.camera.world_to_screen(cluster.bounds.max, viewport),
+            );
+            if !viewport.intersects(bounds) {
+                continue;
+            }
+            let color = cluster_color(&cluster.key);
+            let radius = (18.0 * self.camera.scale).clamp(10.0, 28.0);
+            painter.rect_filled(
+                bounds,
+                radius,
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24),
+            );
+            painter.rect_stroke(
+                bounds,
+                radius,
+                Stroke::new(
+                    1.5,
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 92),
+                ),
+                StrokeKind::Inside,
+            );
+
+            let label = if cluster.name == "Untagged" {
+                cluster.name.clone()
+            } else {
+                format!("#{}", cluster.name)
+            };
+            let label = painter.layout_no_wrap(
+                format!("{label}  ·  {} notes", cluster.note_count),
+                FontId::proportional(11.0),
+                Color32::WHITE,
+            );
+            let label_position = Pos2::new(
+                (bounds.left() + 12.0).max(viewport.left() + 12.0),
+                (bounds.top() + 12.0).max(viewport.top() + 12.0),
+            );
+            let label_rect =
+                Rect::from_min_size(label_position, label.size()).expand2(Vec2::new(9.0, 6.0));
+            painter.rect_filled(
+                label_rect,
+                6.0,
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 238),
+            );
+            painter.rect_stroke(
+                label_rect,
+                6.0,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 72)),
+                StrokeKind::Inside,
+            );
+            painter.galley(label_position, label, Color32::WHITE);
+        }
+    }
+
     pub(super) fn paint_edges(
         &self,
         painter: &eframe::egui::Painter,
@@ -432,15 +489,25 @@ pub(super) fn font_sizes(level: DetailLevel, scale: f32) -> FontSizes {
 }
 
 fn note_color(note: &NoteRecord) -> Color32 {
-    const PALETTE: [Color32; 6] = [
-        Color32::from_rgb(75, 116, 98),
-        Color32::from_rgb(166, 107, 55),
-        Color32::from_rgb(97, 84, 148),
-        Color32::from_rgb(62, 114, 139),
-        Color32::from_rgb(145, 83, 105),
-        Color32::from_rgb(115, 119, 73),
-    ];
     let value = note.tags.first().map(String::as_str).unwrap_or(&note.title);
+    cluster_color(value)
+}
+
+fn cluster_color(value: &str) -> Color32 {
+    const PALETTE: [Color32; 12] = [
+        Color32::from_rgb(59, 113, 90),
+        Color32::from_rgb(165, 102, 42),
+        Color32::from_rgb(100, 81, 160),
+        Color32::from_rgb(47, 112, 154),
+        Color32::from_rgb(154, 72, 101),
+        Color32::from_rgb(111, 119, 55),
+        Color32::from_rgb(38, 126, 126),
+        Color32::from_rgb(177, 76, 48),
+        Color32::from_rgb(73, 83, 155),
+        Color32::from_rgb(145, 67, 143),
+        Color32::from_rgb(128, 90, 59),
+        Color32::from_rgb(77, 99, 115),
+    ];
     let hash = value.bytes().fold(0_usize, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(byte as usize)
     });
