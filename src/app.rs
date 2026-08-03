@@ -275,7 +275,11 @@ impl AtlasApp {
                 self.selected_note = None;
                 self.screen = AppScreen::VaultList;
             }
-            UiAction::SetSelection(note_id) => self.selected_note = note_id,
+            UiAction::SetSelection(note_id) => {
+                self.board.select_note(note_id.as_ref());
+                self.selected_note = note_id;
+                context.request_repaint();
+            }
         }
     }
 
@@ -395,7 +399,12 @@ impl AtlasApp {
             ui.heading(vault_name(&index.root));
             ui.separator();
             ui.label(RichText::new("Pan by dragging anywhere.").small().weak());
-            ui.label(RichText::new("Pinch or Ctrl+wheel to zoom.").small().weak());
+            let zoom_hint = if cfg!(target_os = "linux") {
+                "Ctrl+wheel to zoom."
+            } else {
+                "Pinch or Ctrl+wheel to zoom."
+            };
+            ui.label(RichText::new(zoom_hint).small().weak());
         });
         ui.separator();
 

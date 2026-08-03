@@ -157,6 +157,7 @@ pub fn parse_note(root: &Path, path: &Path, source: &str) -> ParsedNote {
     ParsedNote {
         relative_path,
         title,
+        markdown_body: split.body.to_owned(),
         aliases,
         tags,
         unresolved_references: deduplicate_references(references),
@@ -479,5 +480,15 @@ mod tests {
         let unclosed = parse("fallback.md", "---\ntitle: Never closes\n# Body title");
         assert_eq!(unclosed.title, "Body title");
         assert_eq!(unclosed.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn retained_markdown_body_excludes_valid_frontmatter() {
+        let note = parse(
+            "file.md",
+            "---\ntitle: Frontmatter\ntags: test\n---\n# Heading\n\nBody text",
+        );
+        assert_eq!(note.markdown_body, "# Heading\n\nBody text");
+        assert!(!note.markdown_body.contains("title: Frontmatter"));
     }
 }

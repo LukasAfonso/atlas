@@ -60,6 +60,7 @@ pub struct ReferenceTarget {
 pub struct ParsedNote {
     pub relative_path: PathBuf,
     pub title: String,
+    pub markdown_body: String,
     pub aliases: Vec<String>,
     pub tags: Vec<String>,
     pub unresolved_references: Vec<ReferenceTarget>,
@@ -72,6 +73,7 @@ pub struct NoteRecord {
     pub id: NoteId,
     pub relative_path: PathBuf,
     pub title: String,
+    pub markdown_body: String,
     pub aliases: Vec<String>,
     pub tags: Vec<String>,
     pub references: Vec<NoteId>,

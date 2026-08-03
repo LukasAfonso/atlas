@@ -78,6 +78,7 @@ pub fn resolve_graph(notes: Vec<ParsedNote>) -> VaultIndex {
             id,
             relative_path: note.relative_path,
             title: note.title,
+            markdown_body: note.markdown_body,
             aliases: note.aliases,
             tags: note.tags,
             references: resolved,
@@ -207,6 +208,7 @@ mod tests {
         ParsedNote {
             relative_path: PathBuf::from(path),
             title: title.to_owned(),
+            markdown_body: format!("# {title}"),
             aliases: aliases.iter().map(|alias| (*alias).to_owned()).collect(),
             tags: Vec::new(),
             unresolved_references: references
@@ -294,6 +296,7 @@ mod tests {
         let source = ParsedNote {
             relative_path: PathBuf::from("folder/source.md"),
             title: "Source".to_owned(),
+            markdown_body: "# Source".to_owned(),
             aliases: Vec::new(),
             tags: Vec::new(),
             unresolved_references: ["../target.md", "root.md"]
