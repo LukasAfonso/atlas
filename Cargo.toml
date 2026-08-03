@@ -5,5 +5,13 @@ edition = "2024"
 publish = false
 
 [dependencies]
-eframe = "0.35.0"
+eframe = { version = "0.35.0", features = ["persistence"] }
+ignore = "0.4.32"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+pollster = "0.4"
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
 
+[dev-dependencies]
+tempfile = "3"

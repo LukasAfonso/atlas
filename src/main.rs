@@ -1,3 +1,7 @@
+mod app;
+mod vault;
+
+use app::AtlasApp;
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -13,21 +17,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Atlas",
         options,
-        Box::new(|_creation_context| Ok(Box::new(AtlasApp))),
+        Box::new(|creation_context| Ok(Box::new(AtlasApp::new(creation_context)))),
     )
-}
-
-struct AtlasApp;
-
-impl eframe::App for AtlasApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("Atlas");
-                    ui.label("The native window is working.");
-                });
-            });
-        });
-    }
 }
