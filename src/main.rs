@@ -1,4 +1,5 @@
 mod app;
+mod board;
 mod vault;
 
 use app::AtlasApp;

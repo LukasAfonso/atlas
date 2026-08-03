@@ -13,6 +13,7 @@ use std::{
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 
+use crate::board::BoardState;
 use crate::vault::{
     Diagnostic, DiagnosticSeverity, NoteId, NoteRecord, VaultIndex, VaultScanResult, scan_vault,
 };
@@ -77,7 +78,7 @@ enum UiAction {
     CancelScan,
     BackToVaults,
     Rescan(PathBuf),
-    SelectNote(NoteId),
+    SetSelection(Option<NoteId>),
 }
 
 pub struct AtlasApp {
@@ -86,6 +87,7 @@ pub struct AtlasApp {
     scan_generation: u64,
     scan_job: Option<ScanJob>,
     folder_picker_job: Option<FolderPickerJob>,
+    board: BoardState,
     selected_note: Option<NoteId>,
     notice: Option<(DiagnosticSeverity, String)>,
 }
@@ -110,6 +112,7 @@ impl AtlasApp {
             scan_generation: 0,
             scan_job: None,
             folder_picker_job: None,
+            board: BoardState::default(),
             selected_note: None,
             notice: None,
         }
@@ -160,6 +163,7 @@ impl AtlasApp {
             Some(Ok(envelope)) => {
                 self.scan_job = None;
                 if is_current_generation(self.scan_generation, envelope.generation) {
+                    self.board.rebuild(&envelope.result.index);
                     self.screen = AppScreen::Vault {
                         index: envelope.result.index,
                     };
@@ -271,13 +275,7 @@ impl AtlasApp {
                 self.selected_note = None;
                 self.screen = AppScreen::VaultList;
             }
-            UiAction::SelectNote(note_id) => {
-                self.selected_note = if self.selected_note.as_ref() == Some(&note_id) {
-                    None
-                } else {
-                    Some(note_id)
-                };
-            }
+            UiAction::SetSelection(note_id) => self.selected_note = note_id,
         }
     }
 
@@ -372,9 +370,13 @@ impl AtlasApp {
         actions
     }
 
-    fn render_vault(&self, ui: &mut egui::Ui, index: &VaultIndex) -> Vec<UiAction> {
+    fn render_vault(
+        ui: &mut egui::Ui,
+        index: &VaultIndex,
+        board: &mut BoardState,
+        selected_note: Option<&NoteId>,
+    ) -> Vec<UiAction> {
         let mut actions = Vec::new();
-        let (warnings, errors) = index.diagnostic_counts();
 
         ui.horizontal(|ui| {
             if ui.button("← Vaults").clicked() {
@@ -383,52 +385,19 @@ impl AtlasApp {
             if ui.button("Rescan").clicked() {
                 actions.push(UiAction::Rescan(index.root.clone()));
             }
+            if ui.button("Fit").clicked() {
+                board.request_fit();
+            }
+            if ui.selectable_label(board.debug_open, "Debug").clicked() {
+                board.debug_open = !board.debug_open;
+            }
             ui.separator();
             ui.heading(vault_name(&index.root));
-        });
-        ui.label(
-            RichText::new(index.root.display().to_string())
-                .small()
-                .weak(),
-        );
-        ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            metric(ui, "Notes", index.notes.len());
-            metric(ui, "References", index.reference_count());
-            metric(ui, "Backlinks", index.backlink_count());
-            metric(ui, "Citations", index.unique_citation_count());
-            metric(ui, "Warnings", warnings);
-            metric(ui, "Errors", errors);
-            ui.label(
-                RichText::new(format!(
-                    "{:.1} ms",
-                    index.scan_duration.as_secs_f64() * 1_000.0
-                ))
-                .small()
-                .weak(),
-            );
+            ui.separator();
+            ui.label(RichText::new("Pan by dragging anywhere.").small().weak());
+            ui.label(RichText::new("Pinch or Ctrl+wheel to zoom.").small().weak());
         });
         ui.separator();
-
-        if !index.diagnostics.is_empty() {
-            egui::CollapsingHeader::new(format!("Scan diagnostics ({})", index.diagnostics.len()))
-                .default_open(true)
-                .show(ui, |ui| {
-                    for diagnostic in &index.diagnostics {
-                        diagnostic_label(ui, diagnostic);
-                    }
-                });
-            ui.separator();
-        }
-
-        if let Some(selected) = self
-            .selected_note
-            .as_ref()
-            .and_then(|selected| index.notes.iter().find(|note| &note.id == selected))
-        {
-            render_note_details(ui, selected, index);
-            ui.separator();
-        }
 
         if index.notes.is_empty() {
             ui.centered_and_justified(|ui| {
@@ -437,54 +406,28 @@ impl AtlasApp {
                     ui.label("Add a .md file and rescan when you are ready.");
                 });
             });
-            return actions;
+        } else {
+            let board_output = board.show(ui, index, selected_note);
+            if let Some(selection) = board_output.selection_request {
+                actions.push(UiAction::SetSelection(selection));
+            }
         }
 
-        let mut selected = None;
-        egui::ScrollArea::vertical()
-            .id_salt("vault-note-list")
-            .auto_shrink([false, false])
-            .show_rows(ui, NOTE_ROW_HEIGHT, index.notes.len(), |ui, row_range| {
-                for row in row_range {
-                    let note = &index.notes[row];
-                    let is_selected = self.selected_note.as_ref() == Some(&note.id);
-                    let response = ui.selectable_label(
-                        is_selected,
-                        RichText::new(&note.title).strong().size(15.0),
-                    );
-                    if response.clicked() {
-                        selected = Some(note.id.clone());
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new(note.relative_path.display().to_string())
-                                .small()
-                                .weak(),
-                        );
-                        for tag in &note.tags {
-                            ui.label(
-                                RichText::new(format!("#{tag}"))
-                                    .small()
-                                    .color(Color32::from_rgb(78, 111, 96)),
-                            );
-                        }
-                    });
-                    ui.label(
-                        RichText::new(format!(
-                            "{} references · {} backlinks · {} citations · {} diagnostics",
-                            note.references.len(),
-                            note.backlinks.len(),
-                            note.citations.len(),
-                            note.diagnostics.len()
-                        ))
-                        .small(),
-                    );
-                    ui.separator();
-                }
-            });
-
-        if let Some(note_id) = selected {
-            actions.push(UiAction::SelectNote(note_id));
+        if board.debug_open {
+            let mut open = true;
+            let mut debug_selection = None;
+            egui::Window::new("Vault diagnostics")
+                .id(egui::Id::new("vault-diagnostics"))
+                .open(&mut open)
+                .default_width(560.0)
+                .default_height(620.0)
+                .show(ui.ctx(), |ui| {
+                    debug_selection = render_debug_view(ui, index, selected_note);
+                });
+            board.debug_open = open;
+            if let Some(note_id) = debug_selection {
+                actions.push(UiAction::SetSelection(Some(note_id)));
+            }
         }
         actions
     }
@@ -513,7 +456,9 @@ impl eframe::App for AtlasApp {
                     AppScreen::Scanning { root, generation } => {
                         self.render_scanning(ui, root, *generation)
                     }
-                    AppScreen::Vault { index } => self.render_vault(ui, index),
+                    AppScreen::Vault { index } => {
+                        Self::render_vault(ui, index, &mut self.board, self.selected_note.as_ref())
+                    }
                 }
             })
             .inner;
@@ -532,6 +477,97 @@ impl Drop for AtlasApp {
     fn drop(&mut self) {
         self.cancel_running_scan();
     }
+}
+
+fn render_debug_view(
+    ui: &mut egui::Ui,
+    index: &VaultIndex,
+    selected_note: Option<&NoteId>,
+) -> Option<NoteId> {
+    let (warnings, errors) = index.diagnostic_counts();
+    ui.label(
+        RichText::new(index.root.display().to_string())
+            .small()
+            .weak(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        metric(ui, "Notes", index.notes.len());
+        metric(ui, "References", index.reference_count());
+        metric(ui, "Backlinks", index.backlink_count());
+        metric(ui, "Citations", index.unique_citation_count());
+        metric(ui, "Warnings", warnings);
+        metric(ui, "Errors", errors);
+        ui.label(
+            RichText::new(format!(
+                "{:.1} ms",
+                index.scan_duration.as_secs_f64() * 1_000.0
+            ))
+            .small()
+            .weak(),
+        );
+    });
+    ui.separator();
+
+    if !index.diagnostics.is_empty() {
+        egui::CollapsingHeader::new(format!("Scan diagnostics ({})", index.diagnostics.len()))
+            .default_open(true)
+            .show(ui, |ui| {
+                for diagnostic in &index.diagnostics {
+                    diagnostic_label(ui, diagnostic);
+                }
+            });
+        ui.separator();
+    }
+
+    if let Some(selected) =
+        selected_note.and_then(|selected| index.notes.iter().find(|note| &note.id == selected))
+    {
+        render_note_details(ui, selected, index);
+        ui.separator();
+    }
+
+    let mut selection = None;
+    egui::ScrollArea::vertical()
+        .id_salt("vault-debug-note-list")
+        .auto_shrink([false, false])
+        .show_rows(ui, NOTE_ROW_HEIGHT, index.notes.len(), |ui, row_range| {
+            for row in row_range {
+                let note = &index.notes[row];
+                let is_selected = selected_note == Some(&note.id);
+                if ui
+                    .selectable_label(is_selected, RichText::new(&note.title).strong().size(15.0))
+                    .clicked()
+                {
+                    selection = Some(note.id.clone());
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(note.relative_path.display().to_string())
+                            .small()
+                            .weak(),
+                    );
+                    for tag in &note.tags {
+                        ui.label(
+                            RichText::new(format!("#{tag}"))
+                                .small()
+                                .color(Color32::from_rgb(78, 111, 96)),
+                        );
+                    }
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "{} references · {} backlinks · {} citations · {} diagnostics",
+                        note.references.len(),
+                        note.backlinks.len(),
+                        note.citations.len(),
+                        note.diagnostics.len()
+                    ))
+                    .small(),
+                );
+                ui.separator();
+            }
+        });
+    selection
 }
 
 fn render_note_details(ui: &mut egui::Ui, note: &NoteRecord, index: &VaultIndex) {
