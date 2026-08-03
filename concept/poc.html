@@ -1,0 +1,1672 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas — Spatial research workspace</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #20241f;
+      --muted: #6f766c;
+      --canvas: #f1f0e9;
+      --paper: #fbfaf6;
+      --line: rgba(45, 51, 43, 0.13);
+      --sage: #47705f;
+      --sage-soft: #dce8e0;
+      --amber: #a2642b;
+      --amber-soft: #f4e4d2;
+      --violet: #76658b;
+      --violet-soft: #e8e1ef;
+      --blue: #52708f;
+      --blue-soft: #dfe9f1;
+      --shadow: 0 18px 48px rgba(52, 54, 46, 0.11), 0 2px 8px rgba(52, 54, 46, 0.08);
+      --shadow-focus: 0 24px 64px rgba(50, 60, 48, 0.18), 0 0 0 2px rgba(71, 112, 95, 0.22);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+
+    body {
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+      user-select: none;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .app {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      isolation: isolate;
+      background:
+        radial-gradient(circle at 22% 17%, rgba(255,255,255,.8), transparent 30%),
+        radial-gradient(circle at 80% 78%, rgba(223, 231, 223, .45), transparent 30%),
+        var(--canvas);
+    }
+
+    .topbar {
+      position: absolute;
+      inset: 18px 20px auto 20px;
+      height: 54px;
+      z-index: 20;
+      display: grid;
+      grid-template-columns: auto minmax(280px, 520px) auto;
+      align-items: center;
+      gap: 26px;
+      pointer-events: none;
+    }
+
+    .brand, .toolbar, .search { pointer-events: auto; }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 7px 12px 7px 8px;
+      background: rgba(251, 250, 246, .84);
+      border: 1px solid rgba(54, 61, 51, .1);
+      border-radius: 14px;
+      box-shadow: 0 5px 18px rgba(49, 51, 44, .07);
+      backdrop-filter: blur(14px);
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      color: white;
+      font-family: Georgia, serif;
+      font-size: 19px;
+      font-weight: 700;
+      background: #29483b;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.16);
+    }
+
+    .brand-copy { line-height: 1.05; }
+    .brand-copy strong { display: block; font-size: 14px; letter-spacing: -.01em; }
+    .brand-copy span { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+
+    .search {
+      justify-self: center;
+      position: relative;
+      width: min(100%, 520px);
+    }
+
+    .search-shell {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 0 11px 0 15px;
+      border: 1px solid rgba(54, 61, 51, .12);
+      border-radius: 14px;
+      background: rgba(251, 250, 246, .9);
+      box-shadow: 0 8px 30px rgba(49, 51, 44, .08);
+      backdrop-filter: blur(16px);
+    }
+
+    .search-icon { font-size: 17px; color: #687166; transform: translateY(-1px); }
+
+    .search input {
+      width: 100%;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--ink);
+      user-select: text;
+      font-size: 14px;
+    }
+
+    .search input::placeholder { color: #7d847b; }
+
+    .key {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 25px;
+      height: 24px;
+      padding: 0 7px;
+      border-radius: 7px;
+      color: #737a71;
+      font-size: 10px;
+      border: 1px solid rgba(54,61,51,.12);
+      background: rgba(235,234,227,.68);
+    }
+
+    .search-results {
+      position: absolute;
+      top: 54px;
+      left: 0;
+      right: 0;
+      display: none;
+      padding: 7px;
+      border: 1px solid rgba(54, 61, 51, .12);
+      border-radius: 15px;
+      background: rgba(251, 250, 246, .97);
+      box-shadow: 0 18px 50px rgba(45, 49, 42, .15);
+      backdrop-filter: blur(20px);
+    }
+
+    .search.has-results .search-results { display: block; }
+
+    .result {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 10px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .result:hover, .result.active { background: #eeeee7; }
+    .result-symbol { color: var(--sage); font-family: Georgia, serif; font-size: 17px; text-align: center; }
+    .result-title { display: block; font-weight: 650; font-size: 13px; }
+    .result-meta { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .result-type { color: #858b83; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+
+    .toolbar {
+      justify-self: end;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tool-group {
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      height: 38px;
+      border: 1px solid rgba(54, 61, 51, .11);
+      border-radius: 11px;
+      background: rgba(251, 250, 246, .84);
+      box-shadow: 0 5px 18px rgba(49,51,44,.06);
+      backdrop-filter: blur(14px);
+    }
+
+    .tool-button {
+      width: 38px;
+      height: 38px;
+      border: 0;
+      border-right: 1px solid rgba(54,61,51,.09);
+      background: transparent;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      font-size: 15px;
+    }
+
+    .tool-button:last-child { border-right: 0; }
+    .tool-button:hover { background: rgba(224,225,216,.6); }
+    .tool-button:focus-visible, .node:focus-visible, .chip:focus-visible { outline: 2px solid #537967; outline-offset: 2px; }
+
+    .zotero-status {
+      height: 38px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-radius: 11px;
+      background: rgba(251, 250, 246, .84);
+      border: 1px solid rgba(54, 61, 51, .11);
+      color: #596158;
+      font-size: 11px;
+      box-shadow: 0 5px 18px rgba(49,51,44,.06);
+      backdrop-filter: blur(14px);
+    }
+
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #4c8767; box-shadow: 0 0 0 3px rgba(76,135,103,.13); }
+
+    .lens-control {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      z-index: 18;
+      display: none;
+      align-items: center;
+      height: 38px;
+      overflow: hidden;
+      border: 1px solid rgba(71,112,95,.2);
+      border-radius: 11px;
+      background: rgba(245,249,246,.94);
+      box-shadow: 0 5px 18px rgba(49,51,44,.07);
+      transform: translateX(-50%);
+    }
+
+    .app.has-lens .lens-control { display: flex; }
+
+    .lens-root,
+    .lens-step,
+    .lens-close {
+      height: 38px;
+      border: 0;
+      border-right: 1px solid rgba(54,61,51,.09);
+      background: transparent;
+      color: #405b4f;
+      cursor: pointer;
+    }
+
+    .lens-root {
+      max-width: 150px;
+      overflow: hidden;
+      padding: 0 11px;
+      font-size: 10px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .lens-step,
+    .lens-close { width: 30px; padding: 0; font-size: 14px; }
+    .lens-close { border-right: 0; }
+    .lens-step:hover, .lens-root:hover, .lens-close:hover { background: rgba(71,112,95,.08); }
+    .lens-step:disabled { color: #aeb4ae; cursor: default; background: transparent; }
+
+    .lens-hops {
+      min-width: 47px;
+      color: #69736b;
+      font-size: 9px;
+      font-weight: 650;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .viewport {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      cursor: grab;
+      touch-action: none;
+    }
+
+    .viewport.dragging { cursor: grabbing; }
+
+    .grid {
+      position: absolute;
+      inset: -100px;
+      pointer-events: none;
+      background-image: radial-gradient(circle, rgba(62,68,59,.17) 1px, transparent 1px);
+      background-size: 24px 24px;
+      opacity: .7;
+      transform-origin: 0 0;
+    }
+
+    .world {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 2900px;
+      height: 2800px;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+
+    .tag-cluster {
+      position: absolute;
+      z-index: 0;
+      border: 1px dashed rgba(74,82,71,.13);
+      border-radius: 44% 56% 48% 52% / 51% 45% 55% 49%;
+      background: rgba(255,255,255,.13);
+      pointer-events: none;
+    }
+
+    .cluster-heading {
+      position: absolute;
+      top: 18px;
+      left: 28px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 9px;
+      border: 0;
+      border-radius: 8px;
+      color: color-mix(in srgb, var(--cluster-color) 76%, #30352f);
+      background: rgba(251,250,246,.54);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+
+    .cluster-heading:hover { background: rgba(251,250,246,.92); }
+    .cluster-heading small { color: #858b83; font-size: 8px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+
+    .cluster-summary {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 390px;
+      transform: translate(-50%, -50%) scale(1.5);
+      display: none;
+      padding: 22px 24px;
+      border: 1px solid color-mix(in srgb, var(--cluster-color) 25%, transparent);
+      border-radius: 20px;
+      background: rgba(251,250,246,.93);
+      box-shadow: 0 18px 44px rgba(52,54,46,.11);
+      text-align: left;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+
+    .cluster-summary-tag {
+      color: var(--cluster-color);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .08em;
+    }
+
+    .cluster-summary h2 {
+      margin: 8px 0 7px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 28px;
+      line-height: 1.08;
+      font-weight: 600;
+      letter-spacing: -.02em;
+    }
+
+    .cluster-summary-footer { display: flex; align-items: center; gap: 9px; margin-top: 15px; color: #727970; font-size: 9px; }
+    .cluster-summary-footer b { color: var(--cluster-color); font-size: 10px; }
+
+    .edges {
+      position: absolute;
+      z-index: 1;
+      inset: 0;
+      width: 2900px;
+      height: 2800px;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .edge {
+      fill: none;
+      stroke: rgba(75, 83, 72, .15);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .edge[data-kind="cites"] { stroke-dasharray: 5 6; }
+    .edge[data-kind="supports"] { stroke: rgba(71,112,95,.28); }
+    .edge[data-kind="extends"] { stroke: rgba(118,101,139,.28); }
+
+    .app.has-focus .edge { opacity: .055; }
+    .app.has-focus .edge.connected { opacity: 1; stroke-width: 2.25; }
+    .app.has-focus .edge.connected[data-kind="cites"] { stroke: rgba(162,100,43,.67); }
+    .app.has-focus .edge.connected[data-kind="supports"] { stroke: rgba(71,112,95,.68); }
+    .app.has-focus .edge.connected[data-kind="extends"] { stroke: rgba(118,101,139,.68); }
+
+    .node {
+      position: absolute;
+      z-index: 2;
+      width: 292px;
+      min-height: 112px;
+      transform: translate(-50%, -50%);
+      padding: 17px 18px 16px;
+      border: 1px solid rgba(57, 64, 54, .13);
+      border-radius: 16px;
+      color: var(--ink);
+      background: rgba(251, 250, 246, .94);
+      box-shadow: 0 8px 24px rgba(52,54,46,.075);
+      cursor: grab;
+      text-align: left;
+      overflow: hidden;
+    }
+
+    .node::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: var(--node-accent, var(--sage));
+      opacity: .8;
+    }
+
+    .node.paper { width: 272px; background: rgba(250,247,240,.96); --node-accent: var(--amber); }
+    .node.data { --node-accent: var(--violet); }
+    .node.question { --node-accent: var(--blue); }
+
+    .node:hover { box-shadow: 0 15px 38px rgba(52,54,46,.13); border-color: rgba(57,64,54,.23); }
+    .viewport.dragging .node { cursor: grabbing; }
+    .node.selected { z-index: 8; box-shadow: var(--shadow-focus); border-color: rgba(71,112,95,.26); }
+    .app.has-focus .node:not(.selected):not(.related) { opacity: .36; filter: saturate(.65); }
+    .app.has-focus .node.related { opacity: 1; }
+
+    .app.has-lens:not(.level-isolated) .node:not(.in-lens) { opacity: 0 !important; pointer-events: none; }
+    .app.has-lens:not(.level-isolated) .node.in-lens { opacity: 1; filter: none; }
+    .app.has-lens:not(.level-isolated) .edge:not(.in-lens) { opacity: 0 !important; }
+    .app.has-lens:not(.level-isolated) .edge.in-lens { opacity: 1; stroke-width: 2; }
+    .app.has-lens.has-path:not(.level-isolated) .node.in-lens:not(.on-path) { opacity: .16; filter: saturate(.35); }
+    .app.has-lens.has-path:not(.level-isolated) .node.on-path { opacity: 1; filter: none; border-color: rgba(71,112,95,.45); box-shadow: var(--shadow-focus); }
+    .app.has-lens.has-path:not(.level-isolated) .edge.in-lens:not(.on-path) { opacity: .08; }
+    .app.has-lens.has-path:not(.level-isolated) .edge.on-path { opacity: 1; stroke-width: 3; }
+
+    .node-topline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+    }
+
+    .node-kind {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--node-accent, var(--sage));
+      font-size: 9px;
+      font-weight: 750;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    .node-kind-symbol {
+      width: 20px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--node-accent, var(--sage)) 12%, white);
+      font-family: Georgia, serif;
+      font-size: 11px;
+      letter-spacing: 0;
+    }
+
+    .node-actions {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex: 0 0 auto;
+    }
+
+    .node-updated { color: #8a9088; font-size: 9px; }
+
+    .edit-note-inline {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(71,112,95,.24);
+      border-radius: 7px;
+      padding: 5px 7px;
+      background: rgba(255,255,255,.64);
+      color: #476f60;
+      font: 700 8px/1 Inter, ui-sans-serif, sans-serif;
+      cursor: pointer;
+    }
+
+    .node.selected .edit-note-inline,
+    .level-isolated .node.central .edit-note-inline { display: inline-flex; }
+
+    .edit-note-inline:hover { background: rgba(71,112,95,.1); }
+
+    .edit-note-button {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      height: 38px;
+      border: 1px solid rgba(71, 112, 95, .24);
+      border-radius: 11px;
+      padding: 0 13px;
+      background: rgba(251, 250, 246, .9);
+      color: #476f60;
+      box-shadow: 0 5px 18px rgba(49, 51, 44, .06);
+      font: 700 10px/1 Inter, ui-sans-serif, sans-serif;
+      letter-spacing: .02em;
+      cursor: pointer;
+    }
+
+    .edit-note-button:hover { background: rgba(71, 112, 95, .09); }
+
+    .node-relations {
+      display: none;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+      padding-top: 11px;
+      border-top: 1px solid rgba(57, 64, 54, .1);
+    }
+
+    .relation-heading {
+      display: block;
+      margin-bottom: 6px;
+      color: #858b83;
+      font-size: 8px;
+      font-weight: 750;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .relation-list { display: grid; gap: 4px; }
+
+    .relation-link {
+      width: 100%;
+      overflow: hidden;
+      border: 0;
+      border-radius: 6px;
+      padding: 5px 6px;
+      background: rgba(71, 112, 95, .065);
+      color: #4f6259;
+      font: 600 8px/1.25 Inter, ui-sans-serif, sans-serif;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .relation-link:hover { background: rgba(71, 112, 95, .12); }
+    .relation-empty { color: #9a9f98; font-size: 8px; }
+
+    .node h2 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 21px;
+      line-height: 1.16;
+      font-weight: 600;
+      letter-spacing: -.015em;
+    }
+
+    .paper h2 { font-size: 19px; }
+
+    .node-markdown {
+      max-height: 58px;
+      margin-top: 10px;
+      overflow: hidden;
+      color: #50574f;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 12.5px;
+      line-height: 1.52;
+    }
+
+    .node-markdown p { margin: 0 0 11px; }
+
+    .node-markdown blockquote {
+      margin: 0;
+      padding: 10px 11px;
+      border-left: 2px solid color-mix(in srgb, var(--node-accent, var(--sage)) 55%, white);
+      background: rgba(232,233,225,.46);
+      border-radius: 0 8px 8px 0;
+      color: #5e645c;
+      font-style: italic;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .level-content .node-markdown,
+    .level-isolated .node.central .node-markdown {
+      max-height: none;
+    }
+
+    .node-footer {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      border: 0;
+      border-radius: 99px;
+      padding: 4px 7px;
+      background: #ecece5;
+      color: #687067;
+      font-size: 8.5px;
+    }
+
+    .chip.home-tag {
+      color: var(--node-accent, var(--sage));
+      background: color-mix(in srgb, var(--node-accent, var(--sage)) 12%, white);
+      font-weight: 650;
+    }
+
+    .citation-count { margin-left: auto; color: #858b83; font-size: 9px; white-space: nowrap; }
+
+    .level-regions .node { opacity: 0; pointer-events: none; }
+    .level-regions .edge { opacity: 0; }
+    .level-regions .legend { display: none; }
+    .level-regions .cluster-summary { display: block; }
+    .level-regions .cluster-heading { display: none; }
+    .level-regions .tag-cluster { border-style: solid; border-color: color-mix(in srgb, var(--cluster-color) 18%, transparent); }
+
+    .level-titles .node-markdown,
+    .level-titles .node-footer { display: none; }
+
+    .level-titles .node { min-height: 0; }
+
+    .level-isolated .node { opacity: 0 !important; pointer-events: none; }
+    .level-isolated .node.central { opacity: 1 !important; pointer-events: auto; z-index: 10; box-shadow: var(--shadow-focus); }
+    .level-isolated #editNoteButton,
+    .app.has-focus #editNoteButton { display: inline-flex; }
+    .level-isolated .node.central .node-relations { display: grid; }
+    .level-isolated .edge,
+    .level-isolated .tag-cluster { opacity: 0 !important; pointer-events: none; }
+    .level-isolated.has-lens .tag-cluster { opacity: 1 !important; }
+    .level-isolated.has-lens .cluster-heading { display: flex; pointer-events: auto; }
+
+    .hint {
+      position: absolute;
+      left: 50%;
+      bottom: 24px;
+      z-index: 15;
+      transform: translateX(-50%);
+      padding: 7px 11px;
+      border-radius: 99px;
+      background: rgba(47,52,45,.82);
+      color: rgba(255,255,255,.9);
+      font-size: 9px;
+      letter-spacing: .02em;
+      pointer-events: none;
+      transition: opacity .4s ease;
+    }
+
+    .hint.hidden { opacity: 0; }
+    .app.has-lens .hint { opacity: 0; }
+
+    .minimap {
+      position: absolute;
+      right: 22px;
+      bottom: 22px;
+      z-index: 15;
+      width: 166px;
+      height: 110px;
+      overflow: hidden;
+      border-radius: 13px;
+      border: 1px solid rgba(54,61,51,.12);
+      background: rgba(244,243,237,.88);
+      box-shadow: 0 8px 24px rgba(49,51,44,.08);
+      backdrop-filter: blur(14px);
+      cursor: pointer;
+    }
+
+    .minimap-title {
+      position: absolute;
+      top: 8px;
+      left: 10px;
+      z-index: 2;
+      color: #757c73;
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .mini-node { position: absolute; width: 4px; height: 4px; margin: -2px; border-radius: 50%; background: #758078; }
+    .mini-node.paper { background: var(--amber); }
+    .mini-node.selected { width: 7px; height: 7px; margin: -3.5px; background: var(--sage); box-shadow: 0 0 0 3px rgba(71,112,95,.15); }
+    .mini-viewport { position: absolute; border: 1px solid rgba(71,112,95,.72); background: rgba(71,112,95,.06); border-radius: 3px; pointer-events: none; }
+
+    .legend {
+      position: absolute;
+      right: 202px;
+      bottom: 28px;
+      z-index: 15;
+      display: flex;
+      gap: 13px;
+      color: #737a71;
+      font-size: 8.5px;
+      pointer-events: none;
+    }
+
+    .legend span { display: flex; align-items: center; gap: 5px; }
+    .legend i { width: 14px; height: 1px; display: inline-block; background: var(--sage); }
+    .legend .cites i { height: 0; border-top: 1px dashed var(--amber); background: transparent; }
+    .legend .extends i { background: var(--violet); }
+
+    .tour {
+      position: absolute;
+      z-index: 30;
+      left: 50%;
+      top: 50%;
+      width: min(410px, calc(100vw - 40px));
+      transform: translate(-50%, -50%);
+      padding: 24px;
+      border-radius: 20px;
+      background: rgba(251,250,246,.97);
+      border: 1px solid rgba(54,61,51,.12);
+      box-shadow: 0 28px 90px rgba(36,42,34,.24);
+      backdrop-filter: blur(18px);
+      transition: opacity .2s ease, transform .2s ease;
+    }
+
+    .tour.hidden { opacity: 0; transform: translate(-50%, -48%) scale(.98); pointer-events: none; }
+    .tour-kicker { color: var(--sage); font-size: 9px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    .tour h1 { margin: 9px 0 10px; font-family: Georgia, serif; font-size: 30px; line-height: 1.04; letter-spacing: -.025em; }
+    .tour p { margin: 0; color: #626961; font-family: Georgia, serif; font-size: 14px; line-height: 1.52; }
+    .tour-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; }
+    .tour-actions small { color: #858b83; font-size: 9px; line-height: 1.4; }
+    .primary {
+      flex: 0 0 auto;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: #29483b;
+      color: white;
+      font-size: 11px;
+      font-weight: 650;
+      cursor: pointer;
+      box-shadow: 0 6px 14px rgba(41,72,59,.2);
+    }
+
+    .scrim {
+      position: absolute;
+      inset: 0;
+      z-index: 29;
+      background: rgba(41,45,38,.12);
+      backdrop-filter: blur(2px);
+      transition: opacity .2s ease;
+    }
+
+    .scrim.hidden { opacity: 0; pointer-events: none; }
+
+    @media (max-width: 850px) {
+      .topbar { grid-template-columns: auto 1fr; gap: 12px; }
+      .search { grid-column: 1 / -1; grid-row: 2; width: calc(100vw - 40px); }
+      .toolbar { grid-column: 2; grid-row: 1; }
+      .zotero-status { display: none; }
+      .brand-copy span { display: none; }
+      .legend { display: none; }
+      .minimap { width: 130px; height: 88px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app level-overview" id="app">
+    <header class="topbar">
+      <div class="brand" aria-label="Atlas research workspace">
+        <div class="brand-mark">A</div>
+        <div class="brand-copy"><strong>Atlas</strong><span>Research workspace</span></div>
+      </div>
+
+      <div class="search" id="search">
+        <div class="search-shell">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Find an idea, author, citation…" aria-label="Search the research atlas">
+          <span class="key">⌘ K</span>
+        </div>
+        <div class="search-results" id="searchResults" role="listbox"></div>
+      </div>
+
+      <div class="toolbar">
+        <div class="zotero-status" title="Static connection status for this prototype"><span class="status-dot"></span>Zotero connected</div>
+        <div class="lens-control" id="lensControl" aria-label="Subgraph lens controls">
+          <button class="lens-root" id="lensRootButton" type="button" title="Recenter focused note"><span id="lensTitle">Focused note</span></button>
+          <button class="lens-step" id="lensMinusButton" type="button" aria-label="Show fewer hops">−</button>
+          <span class="lens-hops" id="lensHopCount">1 hop</span>
+          <button class="lens-step" id="lensPlusButton" type="button" aria-label="Show more hops">+</button>
+          <button class="lens-close" id="lensCloseButton" type="button" aria-label="Close subgraph lens">×</button>
+        </div>
+        <button class="edit-note-button" id="editNoteButton" type="button" title="Editing is not implemented in this prototype">Edit note</button>
+        <div class="tool-group" aria-label="View controls">
+          <button class="tool-button" id="backButton" title="Previous location (H)" aria-label="Previous location">←</button>
+          <button class="tool-button" id="overviewButton" title="Fit all notes (0)" aria-label="Fit all notes">⌂</button>
+          <button class="tool-button" id="minusButton" title="Zoom out" aria-label="Zoom out">−</button>
+          <button class="tool-button" id="plusButton" title="Zoom in" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="viewport" id="viewport" aria-label="Spatial note board">
+      <div class="grid" id="grid"></div>
+      <div class="world" id="world">
+        <svg class="edges" id="edges" aria-hidden="true"></svg>
+      </div>
+    </section>
+
+    <div class="hint" id="hint">Scroll to zoom · click a #tag cluster to enter · deepest zoom isolates the centered note</div>
+    <div class="legend"><span><i></i>references</span><span class="extends"><i></i>backlinks</span><span class="cites"><i></i>citations</span></div>
+
+    <aside class="minimap" id="minimap" aria-label="Atlas minimap">
+      <div class="minimap-title">Atlas overview</div>
+      <div class="mini-viewport" id="miniViewport"></div>
+    </aside>
+
+    <div class="scrim" id="scrim"></div>
+    <section class="tour" id="tour" aria-labelledby="tourTitle">
+      <div class="tour-kicker">Static interaction prototype</div>
+      <h1 id="tourTitle">Your notes as one navigable world.</h1>
+      <p>Obsidian tags define the map. Zoom out to see tag clusters, then move closer to reveal the same Markdown from its opening lines through the full note.</p>
+      <div class="tour-actions">
+        <small>No note editing yet.<br>Everything here is sample data.</small>
+        <button class="primary" id="enterButton">Enter the atlas</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const WORLD = { width: 2900, height: 2800 };
+    const clusters = [
+      {
+        id: 'causal', tag: '#causal', title: 'Causal inference',
+        x: 80, y: 100, width: 1350, height: 1200, columns: 3, color: '#47705f', background: 'rgba(220,232,224,.46)'
+      },
+      {
+        id: 'evidence', tag: '#evidence', title: 'Evidence base',
+        x: 1530, y: 80, width: 1250, height: 1200, columns: 2, color: '#a2642b', background: 'rgba(244,228,210,.43)'
+      },
+      {
+        id: 'data', tag: '#data', title: 'Data foundation',
+        x: 650, y: 1500, width: 1500, height: 1200, columns: 2, color: '#76658b', background: 'rgba(232,225,239,.42)'
+      }
+    ];
+
+    const nodes = [
+      {
+        id: 'causal-representation', x: 760, y: 550, kind: 'note', label: 'Synthesis note', updated: 'Today',
+        title: 'Causal representation learning',
+        markdown: 'A working synthesis of how learned representations can preserve intervention-relevant structure.\n\nThe core question is not whether a representation predicts well, but whether it retains the distinctions needed to reason across interventions, populations, and time.\n\n> Predictive sufficiency is not automatically causal sufficiency.',
+        tags: ['#causal/representation', '#thesis'], citations: 8
+      },
+      {
+        id: 'target-trial', x: 370, y: 330, kind: 'note', label: 'Concept note', updated: '2d',
+        title: 'Target trial emulation',
+        markdown: 'Specify eligibility, treatment strategies, assignment, follow-up, outcomes, and analysis before touching the observational data.\n\nThe protocol acts as a design constraint. It makes time zero, grace periods, censoring, and estimands explicit enough to expose avoidable bias.\n\n> Design the trial you wish had been run; then emulate it.',
+        tags: ['#causal/target-trials', '#estimand'], citations: 5
+      },
+      {
+        id: 'time-varying', x: 460, y: 760, kind: 'note', label: 'Mechanism', updated: '5d',
+        title: 'Time-varying confounding',
+        markdown: 'When prior treatment affects a later confounder, ordinary adjustment can block part of the treatment effect.\n\nLongitudinal g-methods separate the observed treatment process from the intervention distribution we want to compare.\n\n> Temporal ordering is part of the causal model, not data-cleaning detail.',
+        tags: ['#causal/g-methods', '#longitudinal'], citations: 12
+      },
+      {
+        id: 'treatment-strategies', x: 980, y: 295, kind: 'question', label: 'Open question', updated: '1w',
+        title: 'Dynamic treatment strategies',
+        markdown: 'How should adaptive clinical decisions be represented when actions depend on evolving patient history?\n\nA useful strategy must be clinically interpretable, feasible under the available observation process, and estimable with adequate positivity.\n\n> A strategy is a rule over histories, not a static exposure label.',
+        tags: ['#causal/strategies', '#positivity'], citations: 4
+      },
+      {
+        id: 'transportability', x: 1080, y: 790, kind: 'note', label: 'Synthesis note', updated: '3d',
+        title: 'Transportability across populations',
+        markdown: 'Separating mechanisms that travel from population-specific distributions that do not.\n\nThe research opportunity lies in expressing which causal structure is assumed stable, then diagnosing where selection and measurement processes break that assumption.\n\n> Generalization needs a declared target population.',
+        tags: ['#causal/transportability', '#dataset-shift'], citations: 9
+      },
+      {
+        id: 'hernan-robins', x: 1500, y: 300, kind: 'paper', label: 'Zotero · Book', updated: '2020',
+        title: 'Causal Inference: What If',
+        markdown: 'Hernán & Robins · foundational reference for target trials, g-methods, and longitudinal causal inference.\n\nUsed throughout the methodology notes as the shared vocabulary for counterfactuals, identification, and estimation.\n\n> Annotation · Ch. 19 connects observational analyses to explicit trial protocols.',
+        tags: ['#evidence/books', '#author/hernan-robins'], citations: 17
+      },
+      {
+        id: 'keogh-2018', x: 1880, y: 490, kind: 'paper', label: 'Zotero · Paper', updated: '2018',
+        title: 'Estimating per-protocol effects in pragmatic trials',
+        markdown: 'Keogh et al. · practical comparison of approaches for sustained treatment strategies.\n\nA useful bridge between the protocol language of trials and the longitudinal adjustment machinery required after non-adherence.\n\n> Annotation · Compare cloning, censoring, and weighting assumptions.',
+        tags: ['#evidence/papers', '#per-protocol'], citations: 6
+      },
+      {
+        id: 'evidence-gaps', x: 2100, y: 230, kind: 'question', label: 'Research gap', updated: 'Yesterday',
+        title: 'Evidence gaps',
+        markdown: 'Few evaluations test whether representations remain useful under intervention and dataset shift.\n\nBenchmarks reward held-out prediction more often than faithful counterfactual ranking, policy value, or transport to a declared target setting.\n\n> Evaluation should fail loudly when causal assumptions stop travelling.',
+        tags: ['#evidence/gaps', '#evaluation'], citations: 11
+      },
+      {
+        id: 'digital-twin', x: 1710, y: 735, kind: 'paper', label: 'Zotero · Review', updated: '2024',
+        title: 'Digital twins in healthcare',
+        markdown: 'A map of definitions, model classes, clinical ambitions, and validation gaps.\n\nThe literature often mixes simulation, forecasting, mechanistic models, and patient-specific decision support under a single metaphor.\n\n> Annotation · Insist on the intervention interface, not just the twin metaphor.',
+        tags: ['#evidence/reviews', '#digital-twins'], citations: 14
+      },
+      {
+        id: 'omop', x: 980, y: 1100, kind: 'data', label: 'Data model', updated: '4d',
+        title: 'OMOP as analytical substrate',
+        markdown: 'A common representation for longitudinal healthcare events, vocabulary concepts, cohorts, and analysis outputs.\n\nOMOP is downstream of ingestion and harmonization. Its value is a consistent analytical contract across sources—not a claim that the original data were simple.\n\n> Representation choices determine which histories can be reconstructed.',
+        tags: ['#data/omop', '#ohdsi'], citations: 7
+      },
+      {
+        id: 'temporal-alignment', x: 1330, y: 1260, kind: 'data', label: 'Method note', updated: 'Today',
+        title: 'Temporal alignment',
+        markdown: 'Relating event time, observation time, decision time, and database availability without leaking the future.\n\nThe cohort timeline should make treatment decisions and covariate availability explicit at each decision point.\n\n> A timestamp is evidence only for what could have been known then.',
+        tags: ['#data/temporal', '#leakage'], citations: 3
+      },
+      {
+        id: 'phenotyping', x: 750, y: 1390, kind: 'data', label: 'Pipeline note', updated: '6d',
+        title: 'Computable phenotypes',
+        markdown: 'Translate reusable clinical intent into executable cohort logic with explicit provenance and versioning.\n\nPhenotypes bridge clinical concepts and observable data. They should preserve the reasoning behind inclusion, exclusion, and temporal constraints.\n\n> Cohort execution materializes logic; it does not define the intent.',
+        tags: ['#data/phenotypes', '#provenance'], citations: 5
+      },
+      {
+        id: 'observation-process', x: 1780, y: 1200, kind: 'data', label: 'Open question', updated: '2w',
+        title: 'The observation process',
+        markdown: 'Clinical data record care processes, not an unbiased movie of the patient state.\n\nMeasurement frequency, access, coding, and clinician attention are structured causes of what becomes observable.\n\n> Missingness is often an event generated by the healthcare system.',
+        tags: ['#data/observation', '#missingness'], citations: 10
+      }
+    ];
+
+    nodes.forEach(node => {
+      const isCitation = node.kind === 'paper';
+      node.label = isCitation ? 'Citation' : 'Note';
+    });
+
+    const links = [
+      ['causal-representation','target-trial','supports'],
+      ['causal-representation','time-varying','supports'],
+      ['causal-representation','treatment-strategies','extends'],
+      ['causal-representation','transportability','extends'],
+      ['target-trial','hernan-robins','cites'],
+      ['time-varying','hernan-robins','cites'],
+      ['time-varying','keogh-2018','cites'],
+      ['treatment-strategies','keogh-2018','cites'],
+      ['transportability','evidence-gaps','supports'],
+      ['transportability','digital-twin','cites'],
+      ['evidence-gaps','digital-twin','cites'],
+      ['causal-representation','omop','supports'],
+      ['time-varying','temporal-alignment','supports'],
+      ['omop','temporal-alignment','extends'],
+      ['omop','phenotyping','supports'],
+      ['temporal-alignment','observation-process','extends'],
+      ['transportability','observation-process','supports'],
+      ['treatment-strategies','temporal-alignment','supports']
+    ];
+
+    const app = document.getElementById('app');
+    const viewport = document.getElementById('viewport');
+    const world = document.getElementById('world');
+    const grid = document.getElementById('grid');
+    const edges = document.getElementById('edges');
+    const minimap = document.getElementById('minimap');
+    const miniViewport = document.getElementById('miniViewport');
+    const hint = document.getElementById('hint');
+    const search = document.getElementById('search');
+    const searchInput = document.getElementById('searchInput');
+    const searchResults = document.getElementById('searchResults');
+    const lensTitle = document.getElementById('lensTitle');
+    const lensHopCount = document.getElementById('lensHopCount');
+    const lensMinusButton = document.getElementById('lensMinusButton');
+    const lensPlusButton = document.getElementById('lensPlusButton');
+
+    const MIN_SCALE = .25;
+    const MAX_SCALE = 8;
+    const ISOLATION_RATIO = .75;
+    const state = { x: 0, y: 0, scale: .62, selected: null, central: null, dragging: false, moved: false, history: [], searchIndex: 0, lensRoot: null, lensHops: 1, lensPathTarget: null };
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    const clusterMap = new Map(clusters.map(cluster => [cluster.id, cluster]));
+    const nodeEls = new Map();
+    const adjacency = new Map(nodes.map(node => [node.id, new Set()]));
+    links.forEach(([from, to]) => {
+      adjacency.get(from).add(to);
+      adjacency.get(to).add(from);
+    });
+
+    function homeCluster(node) {
+      const homeTag = node.tags.find(tag => tag.startsWith('#')) || '#untagged';
+      return homeTag.slice(1).split('/')[0];
+    }
+
+    function layoutNodesByTags() {
+      clusters.forEach(cluster => {
+        const members = nodes.filter(node => homeCluster(node) === cluster.id);
+        const columns = Math.min(cluster.columns, members.length);
+        const rows = Math.ceil(members.length / columns);
+        const insetX = 150;
+        const insetY = 160;
+        const usableWidth = cluster.width - insetX * 2;
+        const usableHeight = cluster.height - insetY * 2;
+        const cellWidth = usableWidth / columns;
+        const cellHeight = usableHeight / rows;
+
+        members.forEach((node, index) => {
+          const row = Math.floor(index / columns);
+          const column = index % columns;
+          const itemsInRow = Math.min(columns, members.length - row * columns);
+          const rowOffset = (columns - itemsInRow) * cellWidth / 2;
+          node.x = cluster.x + insetX + rowOffset + cellWidth * (column + .5);
+          node.y = cluster.y + insetY + cellHeight * (row + .5);
+        });
+      });
+    }
+
+    layoutNodesByTags();
+
+    function symbolFor(node) {
+      if (node.kind === 'paper') return 'Z';
+      if (node.kind === 'question') return '?';
+      if (node.kind === 'data') return '◇';
+      return '§';
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+      })[character]);
+    }
+
+    function renderMarkdown(markdown) {
+      return markdown.split(/\n\s*\n/).map(block => {
+        const trimmed = block.trim();
+        if (trimmed.startsWith('>')) return `<blockquote>${escapeHtml(trimmed.slice(1).trim())}</blockquote>`;
+        return `<p>${escapeHtml(trimmed)}</p>`;
+      }).join('');
+    }
+
+    function markdownText(markdown) {
+      return markdown.replace(/^>\s*/gm, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function renderClusters() {
+      clusters.forEach(cluster => {
+        const members = nodes.filter(node => homeCluster(node) === cluster.id);
+        const nestedTags = [...new Set(members.map(node => node.tags[0].split('/')[1]).filter(Boolean))].slice(0, 3);
+        const el = document.createElement('section');
+        el.className = 'tag-cluster';
+        el.dataset.cluster = cluster.id;
+        el.style.left = `${cluster.x}px`;
+        el.style.top = `${cluster.y}px`;
+        el.style.width = `${cluster.width}px`;
+        el.style.height = `${cluster.height}px`;
+        el.style.setProperty('--cluster-color', cluster.color);
+        el.style.background = cluster.background;
+        el.innerHTML = `
+          <button class="cluster-heading" type="button" aria-label="Open ${cluster.tag} cluster">
+            ${cluster.tag} <small>${members.length} notes</small>
+          </button>
+          <button class="cluster-summary" type="button" aria-label="Open ${cluster.tag} cluster">
+            <span class="cluster-summary-tag">${cluster.tag}</span>
+            <h2>${cluster.title}</h2>
+            <span class="cluster-summary-footer"><b>${members.length} notes</b>${nestedTags.map(tag => `#${tag}`).join(' · ')}</span>
+          </button>`;
+        el.querySelectorAll('button').forEach(button => button.addEventListener('click', event => {
+          event.stopPropagation();
+          focusCluster(cluster.id);
+        }));
+        world.appendChild(el);
+      });
+    }
+
+    function renderNodes() {
+      const renderRelationGroup = (nodeId, dimension) => {
+        const matches = links.filter(([from, to, kind]) => {
+          if (dimension === 'citations') return from === nodeId && kind === 'cites';
+          if (dimension === 'references') return from === nodeId && kind !== 'cites';
+          return to === nodeId;
+        });
+        if (!matches.length) return '<span class="relation-empty">None</span>';
+        return matches.map(([from, to]) => {
+          const targetId = dimension === 'backlinks' ? from : to;
+          return `<button class="relation-link" type="button" data-target="${targetId}" title="${nodeMap.get(targetId).title}">${nodeMap.get(targetId).title}</button>`;
+        }).join('');
+      };
+
+      nodes.forEach(node => {
+        const el = document.createElement('article');
+        el.className = `node ${node.kind}`;
+        el.id = `node-${node.id}`;
+        el.tabIndex = 0;
+        el.dataset.id = node.id;
+        el.style.left = `${node.x}px`;
+        el.style.top = `${node.y}px`;
+        el.style.setProperty('--node-accent', clusterMap.get(homeCluster(node))?.color || '#6f766c');
+        el.setAttribute('aria-label', `${node.label}: ${node.title}`);
+        el.innerHTML = `
+          <div class="node-topline">
+            <div class="node-kind"><span class="node-kind-symbol">${symbolFor(node)}</span>${node.label}</div>
+            <div class="node-actions">
+              <span class="node-updated">${node.updated}</span>
+              <button class="edit-note-inline" type="button" title="Editing is not implemented in this prototype">Edit note</button>
+            </div>
+          </div>
+          <h2>${node.title}</h2>
+          <div class="node-markdown">${renderMarkdown(node.markdown)}</div>
+          <div class="node-footer">
+            ${node.tags.map((tag, index) => `<span class="chip ${index === 0 ? 'home-tag' : ''}">${tag}</span>`).join('')}
+            <span class="citation-count">${node.citations} ${node.kind === 'paper' ? 'notes' : 'citations'}</span>
+          </div>
+          <div class="node-relations">
+            <div class="relation-group">
+              <span class="relation-heading">Citations</span>
+              <div class="relation-list">${renderRelationGroup(node.id, 'citations')}</div>
+            </div>
+            <div class="relation-group">
+              <span class="relation-heading">References</span>
+              <div class="relation-list">${renderRelationGroup(node.id, 'references')}</div>
+            </div>
+            <div class="relation-group">
+              <span class="relation-heading">Backlinks</span>
+              <div class="relation-list">${renderRelationGroup(node.id, 'backlinks')}</div>
+            </div>
+          </div>`;
+        el.querySelector('.edit-note-inline').addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        el.querySelectorAll('.relation-link').forEach(button => {
+          button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            flyToNode(button.dataset.target, state.scale, true);
+          });
+        });
+        el.addEventListener('click', event => {
+          event.stopPropagation();
+          if (!state.moved) {
+            selectNode(node.id, true);
+            if (state.lensRoot) pinLensPath(node.id);
+          }
+        });
+        el.addEventListener('dblclick', event => {
+          if (event.target.closest('button')) return;
+          event.stopPropagation();
+          flyToNode(node.id, 1.06, true);
+        });
+        el.addEventListener('keydown', event => {
+          if (event.target.closest('button')) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            selectNode(node.id, true);
+            if (state.lensRoot) pinLensPath(node.id);
+          }
+        });
+        el.addEventListener('mouseenter', () => showLensPath(node.id));
+        el.addEventListener('mouseleave', () => {
+          if (state.lensRoot) restoreLensPath();
+        });
+        world.appendChild(el);
+        nodeEls.set(node.id, el);
+      });
+    }
+
+    function curvedPath(a, b) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const bend = Math.min(90, Math.hypot(dx, dy) * .12);
+      const nx = -dy / Math.max(1, Math.hypot(dx, dy));
+      const ny = dx / Math.max(1, Math.hypot(dx, dy));
+      const mx = (a.x + b.x) / 2 + nx * bend;
+      const my = (a.y + b.y) / 2 + ny * bend;
+      return `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;
+    }
+
+    function renderEdges() {
+      links.forEach(([from, to, kind]) => {
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.classList.add('edge');
+        path.dataset.from = from;
+        path.dataset.to = to;
+        path.dataset.kind = kind;
+        path.setAttribute('d', curvedPath(nodeMap.get(from), nodeMap.get(to)));
+        edges.appendChild(path);
+      });
+    }
+
+    function renderMinimap() {
+      nodes.forEach(node => {
+        const el = document.createElement('span');
+        el.className = `mini-node ${node.kind}`;
+        el.dataset.id = node.id;
+        el.style.left = `${node.x / WORLD.width * 100}%`;
+        el.style.top = `${node.y / WORLD.height * 100}%`;
+        minimap.appendChild(el);
+      });
+    }
+
+    function semanticLevel(scale) {
+      if (scale < .38) return ['level-regions', 'Landscape', 'titles'];
+      if (scale < .62) return ['level-titles', 'Overview', 'titles'];
+      if (scale < .9) return ['level-overview', 'Neighborhood', 'summaries'];
+      return ['level-content', 'Reading', 'full notes'];
+    }
+
+    function updateCentralFocus(canIsolate) {
+      let closest = null;
+      let closestDistance = Infinity;
+      const centerX = viewport.clientWidth / 2;
+      const centerY = viewport.clientHeight / 2;
+
+      if (canIsolate) {
+        nodes.forEach(node => {
+          const screenX = state.x + node.x * state.scale;
+          const screenY = state.y + node.y * state.scale;
+          const distance = Math.hypot(screenX - centerX, screenY - centerY);
+          if (distance < closestDistance) {
+            closest = node.id;
+            closestDistance = distance;
+          }
+        });
+      }
+
+      const closestRect = closest ? nodeEls.get(closest).getBoundingClientRect() : null;
+      const shouldIsolate = Boolean(closestRect && (
+        closestRect.width >= viewport.clientWidth * ISOLATION_RATIO ||
+        closestRect.height >= viewport.clientHeight * ISOLATION_RATIO
+      ));
+      state.central = shouldIsolate ? closest : null;
+      nodeEls.forEach((el, id) => el.classList.toggle('central', shouldIsolate && id === closest));
+      minimap.querySelectorAll('.mini-node').forEach(el => el.classList.toggle('selected', (shouldIsolate && el.dataset.id === closest) || el.dataset.id === state.selected));
+      return shouldIsolate;
+    }
+
+    function updateView() {
+      world.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`;
+      const gridSize = 24 * state.scale;
+      grid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+      grid.style.backgroundPosition = `${state.x % gridSize}px ${state.y % gridSize}px`;
+
+      const [scaleLevelClass] = semanticLevel(state.scale);
+      const keepNotesVisible = state.selected || state.lensRoot;
+      const levelClass = keepNotesVisible && scaleLevelClass === 'level-regions' ? 'level-titles' : scaleLevelClass;
+      app.classList.remove('level-regions', 'level-titles', 'level-overview', 'level-content', 'level-isolated');
+      app.classList.add(levelClass);
+      if (updateCentralFocus(levelClass === 'level-content')) {
+        app.classList.remove('level-content');
+        app.classList.add('level-isolated');
+      }
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      const miniW = minimap.clientWidth;
+      const miniH = minimap.clientHeight;
+      miniViewport.style.left = `${Math.max(0, -state.x / state.scale / WORLD.width * miniW)}px`;
+      miniViewport.style.top = `${Math.max(0, -state.y / state.scale / WORLD.height * miniH)}px`;
+      miniViewport.style.width = `${Math.min(miniW, vw / state.scale / WORLD.width * miniW)}px`;
+      miniViewport.style.height = `${Math.min(miniH, vh / state.scale / WORLD.height * miniH)}px`;
+    }
+
+    function clampScale(value) { return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value)); }
+
+    function zoomAt(clientX, clientY, nextScale) {
+      const old = state.scale;
+      const next = clampScale(nextScale);
+      const wx = (clientX - state.x) / old;
+      const wy = (clientY - state.y) / old;
+      state.x = clientX - wx * next;
+      state.y = clientY - wy * next;
+      state.scale = next;
+      updateView();
+      hint.classList.add('hidden');
+    }
+
+    function snapshot() { return { x: state.x, y: state.y, scale: state.scale, selected: state.selected }; }
+
+    function pushHistory() {
+      const last = state.history[state.history.length - 1];
+      if (!last || Math.abs(last.x - state.x) > 8 || Math.abs(last.y - state.y) > 8 || last.selected !== state.selected) {
+        state.history.push(snapshot());
+        if (state.history.length > 20) state.history.shift();
+      }
+    }
+
+    function moveCamera(target) {
+      Object.assign(state, target);
+      updateView();
+    }
+
+    function lensNodeIds(rootId, hops) {
+      const included = new Set([rootId]);
+      let frontier = new Set([rootId]);
+      for (let step = 0; step < hops; step += 1) {
+        const next = new Set();
+        frontier.forEach(id => adjacency.get(id)?.forEach(neighbor => {
+          if (!included.has(neighbor)) {
+            included.add(neighbor);
+            next.add(neighbor);
+          }
+        }));
+        frontier = next;
+        if (!frontier.size) break;
+      }
+      return included;
+    }
+
+    function clearLensPath(resetPinned = false) {
+      if (resetPinned) state.lensPathTarget = null;
+      app.classList.remove('has-path');
+      nodeEls.forEach(el => el.classList.remove('on-path'));
+      edges.querySelectorAll('.edge').forEach(el => el.classList.remove('on-path'));
+    }
+
+    function showLensPath(targetId) {
+      if (!state.lensRoot || state.dragging || !nodeEls.get(targetId)?.classList.contains('in-lens')) return;
+      const previous = new Map([[state.lensRoot, null]]);
+      const queue = [state.lensRoot];
+
+      while (queue.length && !previous.has(targetId)) {
+        const current = queue.shift();
+        adjacency.get(current)?.forEach(neighbor => {
+          if (!previous.has(neighbor)) {
+            previous.set(neighbor, current);
+            queue.push(neighbor);
+          }
+        });
+      }
+
+      if (!previous.has(targetId)) return;
+      const path = [];
+      for (let current = targetId; current !== null; current = previous.get(current)) path.unshift(current);
+      const pathNodes = new Set(path);
+      const pathEdges = new Set(path.slice(1).map((id, index) => [path[index], id].sort().join('|')));
+
+      clearLensPath();
+      app.classList.add('has-path');
+      nodeEls.forEach((el, id) => el.classList.toggle('on-path', pathNodes.has(id)));
+      edges.querySelectorAll('.edge').forEach(edge => {
+        const key = [edge.dataset.from, edge.dataset.to].sort().join('|');
+        edge.classList.toggle('on-path', pathEdges.has(key));
+      });
+    }
+
+    function pinLensPath(targetId) {
+      if (!state.lensRoot || !nodeEls.get(targetId)?.classList.contains('in-lens')) return;
+      state.lensPathTarget = targetId;
+      showLensPath(targetId);
+    }
+
+    function restoreLensPath() {
+      if (state.lensPathTarget && nodeEls.get(state.lensPathTarget)?.classList.contains('in-lens')) {
+        showLensPath(state.lensPathTarget);
+      } else {
+        clearLensPath(true);
+      }
+    }
+
+    function fitLens(ids) {
+      const visibleNodes = [...ids].map(id => nodeMap.get(id)).filter(Boolean);
+      if (!visibleNodes.length) return;
+      const xs = visibleNodes.map(node => node.x);
+      const ys = visibleNodes.map(node => node.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const width = Math.max(520, maxX - minX + 520);
+      const height = Math.max(520, maxY - minY + 520);
+      const scale = clampScale(Math.min((viewport.clientWidth - 180) / width, (viewport.clientHeight - 180) / height, .9));
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      moveCamera({
+        scale,
+        x: viewport.clientWidth / 2 - centerX * scale,
+        y: viewport.clientHeight / 2 - centerY * scale
+      });
+    }
+
+    function updateLens(fit = false) {
+      if (!state.lensRoot) return;
+      clearLensPath();
+      const included = lensNodeIds(state.lensRoot, state.lensHops);
+      nodeEls.forEach((el, id) => el.classList.toggle('in-lens', included.has(id)));
+      edges.querySelectorAll('.edge').forEach(edge => {
+        edge.classList.toggle('in-lens', included.has(edge.dataset.from) && included.has(edge.dataset.to));
+      });
+      minimap.querySelectorAll('.mini-node').forEach(el => el.classList.toggle('in-lens', included.has(el.dataset.id)));
+      lensTitle.textContent = nodeMap.get(state.lensRoot).title;
+      lensHopCount.textContent = `${state.lensHops} ${state.lensHops === 1 ? 'hop' : 'hops'}`;
+      lensMinusButton.disabled = state.lensHops === 0;
+      lensPlusButton.disabled = state.lensHops === 4;
+      if (state.lensPathTarget) {
+        included.has(state.lensPathTarget) ? showLensPath(state.lensPathTarget) : clearLensPath(true);
+      }
+      if (fit) fitLens(included);
+    }
+
+    function activateLens(id) {
+      if (!nodeMap.has(id)) return;
+      pushHistory();
+      state.lensRoot = id;
+      state.lensHops = 1;
+      state.lensPathTarget = null;
+      app.classList.add('has-lens');
+      selectNode(id);
+      updateLens();
+      closeSearch();
+    }
+
+    function setLensHops(hops) {
+      if (!state.lensRoot) return;
+      const next = Math.max(0, Math.min(4, hops));
+      if (next === state.lensHops) return;
+      state.lensHops = next;
+      updateLens();
+    }
+
+    function clearLens(refresh = true) {
+      const rootId = state.lensRoot;
+      clearLensPath(true);
+      state.lensRoot = null;
+      app.classList.remove('has-lens');
+      nodeEls.forEach(el => el.classList.remove('in-lens'));
+      edges.querySelectorAll('.edge').forEach(el => el.classList.remove('in-lens'));
+      minimap.querySelectorAll('.mini-node').forEach(el => el.classList.remove('in-lens'));
+      if (rootId) selectNode(rootId);
+      if (refresh) updateView();
+    }
+
+    function focusCluster(id) {
+      const cluster = clusterMap.get(id);
+      if (!cluster) return;
+      pushHistory();
+      clearSelection();
+      const padding = 170;
+      const scale = clampScale(Math.min(
+        (viewport.clientWidth - padding) / cluster.width,
+        (viewport.clientHeight - padding) / cluster.height,
+        .72
+      ));
+      moveCamera({
+        scale,
+        x: viewport.clientWidth / 2 - (cluster.x + cluster.width / 2) * scale,
+        y: viewport.clientHeight / 2 - (cluster.y + cluster.height / 2) * scale
+      });
+      hint.classList.add('hidden');
+    }
+
+    function fitOverview(animate = true) {
+      pushHistory();
+      clearLens(false);
+      const padding = 140;
+      const scale = clampScale(Math.min((viewport.clientWidth - padding) / (WORLD.width - 100), (viewport.clientHeight - padding) / (WORLD.height - 100), .35));
+      const target = {
+        scale,
+        x: viewport.clientWidth / 2 - WORLD.width / 2 * scale,
+        y: viewport.clientHeight / 2 - WORLD.height / 2 * scale
+      };
+      clearSelection();
+      moveCamera(target);
+    }
+
+    function flyToNode(id, requestedScale = .9, addHistory = true) {
+      const node = nodeMap.get(id);
+      if (!node) return;
+      if (addHistory) pushHistory();
+      const scale = Math.max(state.scale, requestedScale);
+      const target = {
+        scale,
+        x: viewport.clientWidth / 2 - node.x * scale,
+        y: viewport.clientHeight / 2 - node.y * scale
+      };
+      selectNode(id, false);
+      moveCamera(target);
+      closeSearch();
+    }
+
+    function clearSelection() {
+      state.selected = null;
+      if (state.lensRoot) clearLensPath(true);
+      app.classList.remove('has-focus');
+      nodeEls.forEach(el => el.classList.remove('selected', 'related'));
+      edges.querySelectorAll('.edge').forEach(el => el.classList.remove('connected'));
+      minimap.querySelectorAll('.mini-node').forEach(el => el.classList.remove('selected'));
+      updateView();
+    }
+
+    function selectNode(id) {
+      if (state.selected === id) return;
+      state.selected = id;
+      app.classList.add('has-focus');
+      nodeEls.forEach(el => el.classList.toggle('selected', el.dataset.id === id));
+      minimap.querySelectorAll('.mini-node').forEach(el => el.classList.toggle('selected', el.dataset.id === id));
+      const related = new Set();
+      edges.querySelectorAll('.edge').forEach(el => {
+        const connected = el.dataset.from === id || el.dataset.to === id;
+        el.classList.toggle('connected', connected);
+        if (connected) {
+          const other = el.dataset.from === id ? el.dataset.to : el.dataset.from;
+          related.add(other);
+        }
+      });
+      related.forEach(other => nodeEls.get(other)?.classList.add('related'));
+      nodeEls.forEach(el => { if (!related.has(el.dataset.id) && el.dataset.id !== id) el.classList.remove('related'); });
+
+    }
+
+    function goBack() {
+      const previous = state.history.pop();
+      if (!previous) return;
+      previous.selected ? selectNode(previous.selected, false) : clearSelection();
+      moveCamera(previous);
+    }
+
+    let dragStart = null;
+    viewport.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('button, input')) return;
+      state.dragging = true;
+      state.moved = false;
+      dragStart = { clientX: event.clientX, clientY: event.clientY, x: state.x, y: state.y, pointerId: event.pointerId };
+    });
+
+    viewport.addEventListener('pointermove', event => {
+      if (!state.dragging) return;
+      const dx = event.clientX - dragStart.clientX;
+      const dy = event.clientY - dragStart.clientY;
+      if (!state.moved && Math.hypot(dx, dy) < 7) return;
+      if (!state.moved) {
+        state.moved = true;
+        viewport.classList.add('dragging');
+        viewport.setPointerCapture(event.pointerId);
+      }
+      state.x = dragStart.x + dx;
+      state.y = dragStart.y + dy;
+      updateView();
+      hint.classList.add('hidden');
+    });
+
+    function endDrag(event) {
+      state.dragging = false;
+      viewport.classList.remove('dragging');
+      try { viewport.releasePointerCapture(event.pointerId); } catch (_) {}
+      const clickedEmptyBoard = !event.target.closest('.node, button, input');
+      if (!state.moved && clickedEmptyBoard) clearSelection();
+      setTimeout(() => { state.moved = false; }, 0);
+    }
+
+    viewport.addEventListener('pointerup', endDrag);
+    viewport.addEventListener('pointercancel', endDrag);
+
+    viewport.addEventListener('wheel', event => {
+      event.preventDefault();
+      const factor = Math.exp(-event.deltaY * .0012);
+      zoomAt(event.clientX, event.clientY, state.scale * factor);
+    }, { passive: false });
+
+    function renderSearch(query) {
+      const q = query.trim().toLowerCase();
+      if (!q) { closeSearch(false); return; }
+      const results = nodes.filter(node => [node.title, node.markdown, node.label, ...node.tags].join(' ').toLowerCase().includes(q)).slice(0, 6);
+      state.searchIndex = 0;
+      searchResults.innerHTML = results.length ? results.map((node, i) => `
+        <button class="result ${i === 0 ? 'active' : ''}" data-id="${node.id}" role="option">
+          <span class="result-symbol">${symbolFor(node)}</span>
+          <span><span class="result-title">${node.title}</span><span class="result-meta">${markdownText(node.markdown).slice(0, 74)}…</span></span>
+          <span class="result-type">${node.label}</span>
+        </button>`).join('') : `<div class="result"><span class="result-symbol">·</span><span><span class="result-title">No matching notes</span><span class="result-meta">Try an author, concept, or tag.</span></span></div>`;
+      search.classList.add('has-results');
+      searchResults.querySelectorAll('[data-id]').forEach(button => button.addEventListener('click', () => chooseSearchResult(button.dataset.id)));
+    }
+
+    function openSearch() {
+      dismissTour();
+      searchInput.focus();
+      searchInput.select();
+      if (searchInput.value) renderSearch(searchInput.value);
+    }
+
+    function chooseSearchResult(id) {
+      if (state.lensRoot) clearLens(false);
+      flyToNode(id, .9, true);
+    }
+
+    function closeSearch(clear = true) {
+      search.classList.remove('has-results');
+      if (clear) searchInput.value = '';
+      searchInput.blur();
+    }
+
+    searchInput.addEventListener('input', event => renderSearch(event.target.value));
+    searchInput.addEventListener('keydown', event => {
+      const results = [...searchResults.querySelectorAll('[data-id]')];
+      if (event.key === 'Escape') { closeSearch(); return; }
+      if (!results.length) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        state.searchIndex = (state.searchIndex + delta + results.length) % results.length;
+        results.forEach((el, i) => el.classList.toggle('active', i === state.searchIndex));
+      }
+      if (event.key === 'Enter') { event.preventDefault(); chooseSearchResult(results[state.searchIndex].dataset.id); }
+    });
+
+    document.addEventListener('keydown', event => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        if (state.selected) activateLens(state.selected);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openSearch(); return; }
+      if (event.target === searchInput) return;
+      if (event.key === '/') { event.preventDefault(); openSearch(); }
+      if (event.key === 'Escape') state.lensRoot ? clearLens() : clearSelection();
+      if (event.key === '0') fitOverview();
+      if (event.key.toLowerCase() === 'h') goBack();
+      if (event.key === '+' || event.key === '=') zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, state.scale * 1.18);
+      if (event.key === '-') zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, state.scale / 1.18);
+    });
+
+    document.getElementById('plusButton').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, state.scale * 1.2));
+    document.getElementById('minusButton').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, state.scale / 1.2));
+    document.getElementById('overviewButton').addEventListener('click', () => fitOverview());
+    document.getElementById('backButton').addEventListener('click', goBack);
+    document.getElementById('lensMinusButton').addEventListener('click', () => setLensHops(state.lensHops - 1));
+    document.getElementById('lensPlusButton').addEventListener('click', () => setLensHops(state.lensHops + 1));
+    document.getElementById('lensCloseButton').addEventListener('click', () => clearLens());
+    document.getElementById('lensRootButton').addEventListener('click', () => {
+      if (!state.lensRoot) return;
+      selectNode(state.lensRoot);
+      updateLens(true);
+    });
+
+    minimap.addEventListener('click', event => {
+      const rect = minimap.getBoundingClientRect();
+      const wx = (event.clientX - rect.left) / rect.width * WORLD.width;
+      const wy = (event.clientY - rect.top) / rect.height * WORLD.height;
+      pushHistory();
+      moveCamera({ x: viewport.clientWidth / 2 - wx * state.scale, y: viewport.clientHeight / 2 - wy * state.scale, scale: state.scale });
+    });
+
+    function dismissTour() {
+      document.getElementById('tour').classList.add('hidden');
+      document.getElementById('scrim').classList.add('hidden');
+      setTimeout(() => hint.classList.remove('hidden'), 250);
+    }
+
+    document.getElementById('enterButton').addEventListener('click', dismissTour);
+    document.getElementById('scrim').addEventListener('click', dismissTour);
+    window.addEventListener('resize', updateView);
+
+    renderClusters();
+    renderEdges();
+    renderNodes();
+    renderMinimap();
+    fitOverview(false);
+    setTimeout(() => hint.classList.add('hidden'), 8000);
+  </script>
+</body>
+</html>
