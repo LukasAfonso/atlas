@@ -193,6 +193,21 @@ pub(super) fn required_pair_radius(left: Pos2, right: Pos2) -> f32 {
     gap / denominator
 }
 
+pub(super) fn field_value_at(positions: &[Pos2], radius: f32, point: Pos2) -> f32 {
+    positions
+        .iter()
+        .map(|position| {
+            let distance = distance_to_rect(point, Rect::from_center_size(*position, CARD_SIZE));
+            if distance >= radius {
+                0.0
+            } else {
+                let normalized = 1.0 - distance / radius;
+                normalized * normalized
+            }
+        })
+        .sum()
+}
+
 fn distance_to_rect(point: Pos2, rect: Rect) -> f32 {
     let dx = (rect.left() - point.x).max(0.0).max(point.x - rect.right());
     let dy = (rect.top() - point.y).max(0.0).max(point.y - rect.bottom());

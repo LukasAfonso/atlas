@@ -12,8 +12,8 @@ use super::{
         resolved_edges,
     },
     metaballs::{
-        BASE_INFLUENCE_RADIUS, FIELD_CELL_BUDGET, adaptive_field_step, build_geometry,
-        field_bounds, required_pair_radius,
+        BASE_INFLUENCE_RADIUS, FIELD_CELL_BUDGET, FIELD_THRESHOLD, adaptive_field_step,
+        build_geometry, field_bounds, field_value_at, required_pair_radius,
     },
 };
 use crate::vault::{NoteId, NoteRecord, VaultIndex};
@@ -26,6 +26,7 @@ const PRESERVED_WEIGHT: f64 = 32.0;
 const NEW_WEIGHT: f64 = 1.0;
 const MAX_CONNECTIVITY_PASSES: usize = 32;
 const MAX_STALLED_PASSES: usize = 4;
+const CLUSTER_GUTTER_SLOTS: i32 = 1;
 
 pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>) -> BoardLayout {
     if index.notes.is_empty() {
@@ -112,18 +113,20 @@ pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>
     };
     positions = refined;
 
-    let mut raw_radii = BTreeMap::new();
-    let mut fallback_cluster_count = 0;
-    for (tag, members) in &cluster_members {
-        let member_positions: Vec<_> = members.iter().map(|id| positions[id]).collect();
-        let components = connected_components(members, &positions);
-        let raw_radius = if components.len() <= 1 {
-            BASE_INFLUENCE_RADIUS
-        } else {
-            fallback_cluster_count += 1;
-            minimum_spanning_radius(&member_positions).max(BASE_INFLUENCE_RADIUS)
-        };
-        raw_radii.insert(tag.clone(), raw_radius);
+    let (mut raw_radii, mut fallback_tags) = cluster_radii(&cluster_members, &positions);
+    for _ in 0..4 {
+        if separate_foreign_notes(
+            &notes,
+            &note_tags,
+            &cluster_members,
+            &raw_radii,
+            &fallback_tags,
+            &mut positions,
+        ) == 0
+        {
+            break;
+        }
+        (raw_radii, fallback_tags) = cluster_radii(&cluster_members, &positions);
     }
 
     let mut sample_step = sample_step_for(&cluster_members, &positions, &raw_radii);
@@ -141,6 +144,37 @@ pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>
         }
         let next_step = sample_step_for(&cluster_members, &positions, &radii);
         if next_step == sample_step {
+            break;
+        }
+        sample_step = next_step;
+    }
+
+    for _ in 0..8 {
+        let mut radius_changed = false;
+        for (key, members) in &cluster_members {
+            if fallback_tags.contains(key) {
+                continue;
+            }
+            let member_positions: Vec<_> =
+                members.iter().map(|note_id| positions[note_id]).collect();
+            let initial_radius = radii[key];
+            let mut radius = initial_radius;
+            let (_, mut geometry, _) = build_geometry(&member_positions, radius, sample_step);
+            for _ in 0..8 {
+                if geometry.contours.len() == 1 {
+                    break;
+                }
+                radius += sample_step;
+                (_, geometry, _) = build_geometry(&member_positions, radius, sample_step);
+            }
+            if radius > initial_radius {
+                fallback_tags.insert(key.clone());
+                radii.insert(key.clone(), radius);
+                radius_changed = true;
+            }
+        }
+        let next_step = sample_step_for(&cluster_members, &positions, &radii);
+        if !radius_changed && next_step == sample_step {
             break;
         }
         sample_step = next_step;
@@ -193,7 +227,7 @@ pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>
         edges,
         stats: LayoutStats {
             connectivity_passes,
-            fallback_cluster_count,
+            fallback_cluster_count: fallback_tags.len(),
             maximum_influence_radius: radii.values().copied().fold(0.0, f32::max),
             sampled_field_cells: sampled_cells,
             field_step: sample_step,
@@ -297,13 +331,11 @@ fn tag_centers(
     seed: Option<&LayoutSeed>,
     unchanged: &HashSet<NoteId>,
 ) -> HashMap<String, Pos2> {
-    let largest = members.values().map(Vec::len).max().unwrap_or(1);
-    let columns = (largest as f32).sqrt().ceil() as i32;
-    let rows = largest.div_ceil(columns as usize) as i32;
-    let stride = (
-        (columns + 2).max(3) as f32 * GRID_SPACING.x,
-        (rows + 2).max(3) as f32 * GRID_SPACING.y,
-    );
+    if seed.is_none() {
+        return cold_side_by_side_centers(members, weights);
+    }
+
+    let stride = (GRID_SPACING.x * 2.0, GRID_SPACING.y * 2.0);
     let mut centers = BTreeMap::new();
     let mut occupied = HashSet::new();
     if let Some(seed) = seed {
@@ -369,6 +401,101 @@ fn tag_centers(
         );
     }
     centers.into_iter().collect()
+}
+
+fn cold_side_by_side_centers(
+    members: &BTreeMap<String, Vec<NoteId>>,
+    weights: &BTreeMap<(String, String), u32>,
+) -> HashMap<String, Pos2> {
+    let order = relationship_order(members, weights);
+    let side_lengths: BTreeMap<_, _> = members
+        .iter()
+        .map(|(tag, members)| (tag.clone(), compact_side_length(members.len())))
+        .collect();
+    let total_padded_area: i32 = side_lengths
+        .values()
+        .map(|side| {
+            let padded = side + CLUSTER_GUTTER_SLOTS;
+            padded * padded
+        })
+        .sum();
+    let shelf_width = (total_padded_area as f32)
+        .sqrt()
+        .ceil()
+        .max(side_lengths.values().copied().max().unwrap_or(1) as f32) as i32;
+
+    let mut slot_centers = BTreeMap::new();
+    let mut cursor_x = 0;
+    let mut cursor_y = 0;
+    let mut row_height = 0;
+    let mut used_width = 0;
+    for tag in order {
+        let side = side_lengths[&tag];
+        if cursor_x > 0 && cursor_x + side > shelf_width {
+            cursor_x = 0;
+            cursor_y += row_height + CLUSTER_GUTTER_SLOTS;
+            row_height = 0;
+        }
+        slot_centers.insert(
+            tag,
+            (
+                cursor_x as f32 + (side - 1) as f32 * 0.5,
+                cursor_y as f32 + (side - 1) as f32 * 0.5,
+            ),
+        );
+        cursor_x += side + CLUSTER_GUTTER_SLOTS;
+        row_height = row_height.max(side);
+        used_width = used_width.max(cursor_x - CLUSTER_GUTTER_SLOTS);
+    }
+    let used_height = cursor_y + row_height;
+    let offset = (
+        (used_width.saturating_sub(1)) as f32 * 0.5,
+        (used_height.saturating_sub(1)) as f32 * 0.5,
+    );
+    slot_centers
+        .into_iter()
+        .map(|(tag, center)| {
+            (
+                tag,
+                Pos2::new(
+                    (center.0 - offset.0) * GRID_SPACING.x,
+                    (center.1 - offset.1) * GRID_SPACING.y,
+                ),
+            )
+        })
+        .collect()
+}
+
+fn compact_side_length(member_count: usize) -> i32 {
+    let side = (member_count as f32).sqrt().ceil().max(1.0) as i32;
+    if side % 2 == 0 { side + 1 } else { side }
+}
+
+fn relationship_order(
+    members: &BTreeMap<String, Vec<NoteId>>,
+    weights: &BTreeMap<(String, String), u32>,
+) -> Vec<String> {
+    let mut order = Vec::with_capacity(members.len());
+    let mut placed = BTreeMap::new();
+    while order.len() < members.len() {
+        let next = members
+            .keys()
+            .filter(|tag| !placed.contains_key(*tag))
+            .max_by(|left, right| {
+                placed_weight(left, &placed, weights)
+                    .cmp(&placed_weight(right, &placed, weights))
+                    .then_with(|| members[*left].len().cmp(&members[*right].len()))
+                    .then_with(|| {
+                        weighted_degree(left, weights).cmp(&weighted_degree(right, weights))
+                    })
+                    .then_with(|| right.cmp(left))
+            })
+            .expect("an unplaced tag exists")
+            .clone();
+        placed.insert(next.clone(), Pos2::ZERO);
+        order.push(next);
+    }
+    order
 }
 
 fn median(mut values: Vec<f32>) -> f32 {
@@ -934,6 +1061,149 @@ fn minimum_spanning_radius(positions: &[Pos2]) -> f32 {
     maximum_edge
 }
 
+fn cluster_radii(
+    members: &BTreeMap<String, Vec<NoteId>>,
+    positions: &HashMap<NoteId, Pos2>,
+) -> (BTreeMap<String, f32>, BTreeSet<String>) {
+    let mut radii = BTreeMap::new();
+    let mut fallback_tags = BTreeSet::new();
+    for (tag, tag_members) in members {
+        let components = connected_components(tag_members, positions);
+        let radius = if components.len() <= 1 {
+            BASE_INFLUENCE_RADIUS
+        } else {
+            fallback_tags.insert(tag.clone());
+            let member_positions: Vec<_> = tag_members
+                .iter()
+                .map(|note_id| positions[note_id])
+                .collect();
+            minimum_spanning_radius(&member_positions).max(BASE_INFLUENCE_RADIUS)
+        };
+        radii.insert(tag.clone(), radius);
+    }
+    (radii, fallback_tags)
+}
+
+fn separate_foreign_notes(
+    notes: &[&NoteRecord],
+    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
+    members: &BTreeMap<String, Vec<NoteId>>,
+    radii: &BTreeMap<String, f32>,
+    fallback_tags: &BTreeSet<String>,
+    positions: &mut HashMap<NoteId, Pos2>,
+) -> usize {
+    if fallback_tags.is_empty() {
+        return 0;
+    }
+    let separable_fallbacks: BTreeSet<_> = fallback_tags
+        .iter()
+        .filter(|tag| {
+            let shared_members = members[*tag]
+                .iter()
+                .filter(|note_id| note_tags[*note_id].len() > 1)
+                .count();
+            shared_members * 2 <= members[*tag].len()
+        })
+        .collect();
+    if separable_fallbacks.is_empty() {
+        return 0;
+    }
+    let mut occupied: HashSet<_> = positions.values().copied().map(position_slot).collect();
+    let mut moved = 0;
+
+    for note in notes {
+        let own_tags: BTreeSet<_> = note_tags[&note.id]
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        if !separable_fallbacks.iter().any(|tag| {
+            !own_tags.contains(tag.as_str())
+                && tag_field_contains(tag, positions[&note.id], members, radii, positions)
+        }) {
+            continue;
+        }
+
+        let current = position_slot(positions[&note.id]);
+        let mut destination = None;
+        for radius in 1_i32..=32 {
+            let mut candidates = square_ring(current, radius);
+            candidates.sort_by_key(|slot| {
+                let dx = slot.0 - current.0;
+                let dy = slot.1 - current.1;
+                (dx * dx + dy * dy, slot.1, slot.0)
+            });
+            destination = candidates.into_iter().find(|candidate| {
+                !occupied.contains(candidate)
+                    && preserves_own_tag_proximity(
+                        &note.id, *candidate, &own_tags, members, positions,
+                    )
+                    && members.keys().all(|tag| {
+                        own_tags.contains(tag.as_str())
+                            || !tag_field_contains(
+                                tag,
+                                slot_position(*candidate),
+                                members,
+                                radii,
+                                positions,
+                            )
+                    })
+            });
+            if destination.is_some() {
+                break;
+            }
+        }
+        if let Some(destination) = destination {
+            occupied.remove(&current);
+            occupied.insert(destination);
+            positions.insert(note.id.clone(), slot_position(destination));
+            moved += 1;
+        }
+    }
+    moved
+}
+
+fn tag_field_contains(
+    tag: &str,
+    point: Pos2,
+    members: &BTreeMap<String, Vec<NoteId>>,
+    radii: &BTreeMap<String, f32>,
+    positions: &HashMap<NoteId, Pos2>,
+) -> bool {
+    let sources: Vec<_> = members[tag]
+        .iter()
+        .map(|note_id| positions[note_id])
+        .collect();
+    field_value_at(&sources, radii[tag], point) >= FIELD_THRESHOLD
+}
+
+fn preserves_own_tag_proximity(
+    note_id: &NoteId,
+    candidate: (i32, i32),
+    own_tags: &BTreeSet<&str>,
+    members: &BTreeMap<String, Vec<NoteId>>,
+    positions: &HashMap<NoteId, Pos2>,
+) -> bool {
+    own_tags.iter().all(|tag| {
+        let others: Vec<_> = members[*tag]
+            .iter()
+            .filter(|member| *member != note_id)
+            .map(|member| position_slot(positions[member]))
+            .collect();
+        if others.is_empty() {
+            return true;
+        }
+        let current = position_slot(positions[note_id]);
+        let nearest = |slot: (i32, i32)| {
+            others
+                .iter()
+                .map(|other| slot.0.abs_diff(other.0).max(slot.1.abs_diff(other.1)))
+                .min()
+                .expect("a multi-note tag has another member")
+        };
+        nearest(candidate) <= nearest(current).max(1)
+    })
+}
+
 fn sample_step_for(
     members: &BTreeMap<String, Vec<NoteId>>,
     positions: &HashMap<NoteId, Pos2>,
@@ -1024,8 +1294,14 @@ fn note_sort_key(note: &NoteRecord) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CONNECTIVITY_PASSES, compact_offset, minimum_spanning_radius};
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    use super::{
+        MAX_CONNECTIVITY_PASSES, cold_side_by_side_centers, compact_offset, compact_side_length,
+        minimum_spanning_radius,
+    };
     use crate::board::{GRID_SPACING, metaballs::BASE_INFLUENCE_RADIUS};
+    use crate::vault::NoteId;
     use eframe::egui::Pos2;
 
     #[test]
@@ -1035,11 +1311,39 @@ mod tests {
     }
 
     #[test]
+    fn shelf_footprints_match_center_out_note_packing() {
+        assert_eq!(compact_side_length(1), 1);
+        assert_eq!(compact_side_length(9), 3);
+        assert_eq!(compact_side_length(10), 5);
+        assert_eq!(compact_side_length(64), 9);
+        assert_eq!(compact_side_length(100), 11);
+    }
+
+    #[test]
     fn spanning_radius_keeps_adjacent_grid_notes_at_the_base_radius() {
         assert!(
             minimum_spanning_radius(&[Pos2::ZERO, Pos2::new(GRID_SPACING.x, GRID_SPACING.y),])
                 <= BASE_INFLUENCE_RADIUS
         );
         assert_eq!(MAX_CONNECTIVITY_PASSES, 32);
+    }
+
+    #[test]
+    fn static_shelves_place_small_clusters_beside_large_clusters() {
+        let mut members = BTreeMap::new();
+        members.insert(
+            "large".to_owned(),
+            (0..100)
+                .map(|index| NoteId(PathBuf::from(format!("large-{index}.md"))))
+                .collect(),
+        );
+        members.insert("small".to_owned(), vec![NoteId(PathBuf::from("small.md"))]);
+
+        let centers = cold_side_by_side_centers(&members, &BTreeMap::new());
+        let large = centers["large"];
+        let small = centers["small"];
+
+        assert_eq!((small.x - large.x) / GRID_SPACING.x, 7.0);
+        assert_eq!((small.y - large.y) / GRID_SPACING.y, -5.0);
     }
 }

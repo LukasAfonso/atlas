@@ -370,6 +370,41 @@ fn mesh_contains(geometry: &super::metaballs::ClusterGeometry, point: Pos2) -> b
 }
 
 #[test]
+fn unrelated_notes_move_out_of_fallback_cluster_fields() {
+    let vault = index(vec![
+        tagged_note("Alpha 1", &["alpha"]),
+        tagged_note("Alpha 2", &["alpha"]),
+        tagged_note("Blocker", &["beta"]),
+    ]);
+    let cold = prepare_board_layout(&vault, None);
+    let mut seed = seed_from(&cold, "/vault");
+    seed.positions.insert(
+        NoteId(PathBuf::from("Alpha 1.md")),
+        Pos2::new(-GRID_SPACING.x, 0.0),
+    );
+    seed.positions.insert(
+        NoteId(PathBuf::from("Alpha 2.md")),
+        Pos2::new(GRID_SPACING.x, 0.0),
+    );
+    let blocker_id = NoteId(PathBuf::from("Blocker.md"));
+    seed.positions.insert(blocker_id.clone(), Pos2::ZERO);
+
+    let layout = prepare_board_layout(&vault, Some(&seed));
+    let alpha = layout
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == "alpha")
+        .expect("alpha cluster");
+
+    assert_ne!(layout.positions[&blocker_id], Pos2::ZERO);
+    assert!(!mesh_contains(
+        &alpha.geometry,
+        layout.positions[&blocker_id]
+    ));
+    assert_no_card_overlaps(&layout);
+}
+
+#[test]
 #[ignore = "release-mode preparation benchmark"]
 fn benchmark_metaball_preparation() {
     for memberships in [1, 3] {
@@ -399,12 +434,15 @@ fn benchmark_metaball_preparation() {
                 build_geometry(&positions, BASE_INFLUENCE_RADIUS, cold.stats.field_step);
             let field_duration = started.elapsed();
             eprintln!(
-                "notes={count} memberships={memberships} cold_ms={:.1} warm_ms={:.1} field_ms={:.1} sampled_cells={} isolated_field_cells={cells} passes={}",
+                "notes={count} memberships={memberships} cold_ms={:.1} warm_ms={:.1} field_ms={:.1} sampled_cells={} isolated_field_cells={cells} passes={} fallbacks={} max_radius={:.0} step={:.0}",
                 cold_duration.as_secs_f64() * 1_000.0,
                 warm_duration.as_secs_f64() * 1_000.0,
                 field_duration.as_secs_f64() * 1_000.0,
                 cold.stats.sampled_field_cells,
                 cold.stats.connectivity_passes,
+                cold.stats.fallback_cluster_count,
+                cold.stats.maximum_influence_radius,
+                cold.stats.field_step,
             );
             assert!(cold.stats.sampled_field_cells as f32 <= FIELD_CELL_BUDGET);
             if count == 1_000 {
@@ -416,7 +454,7 @@ fn benchmark_metaball_preparation() {
 }
 
 #[test]
-fn independent_cluster_regions_do_not_overlap() {
+fn independent_cluster_regions_use_compact_two_slot_spacing() {
     let layout = clustered_layout(&index(vec![
         tagged_note("Alpha", &["alpha"]),
         tagged_note("Beta", &["beta"]),
@@ -431,8 +469,18 @@ fn independent_cluster_regions_do_not_overlap() {
         .iter()
         .find(|cluster| cluster.name == "beta")
         .expect("beta cluster");
+    let alpha_position = layout.positions[&NoteId(PathBuf::from("Alpha.md"))];
+    let beta_position = layout.positions[&NoteId(PathBuf::from("Beta.md"))];
+    let separation = (alpha_position - beta_position).abs();
 
-    assert!(!rects_overlap(alpha.bounds, beta.bounds));
+    assert_eq!(separation.x, GRID_SPACING.x * 2.0);
+    assert_eq!(separation.y, 0.0);
+    assert!(
+        !Rect::from_center_size(alpha_position, CARD_SIZE)
+            .intersects(Rect::from_center_size(beta_position, CARD_SIZE))
+    );
+    assert!(alpha.bounds.contains(alpha_position));
+    assert!(beta.bounds.contains(beta_position));
 }
 
 #[test]
@@ -561,29 +609,23 @@ fn visual_overlap_does_not_change_cluster_membership_counts() {
     );
 }
 
-fn rects_overlap(left: Rect, right: Rect) -> bool {
-    let overlap = left.intersect(right);
-    overlap.width() > f32::EPSILON && overlap.height() > f32::EPSILON
-}
-
 #[test]
-fn relationships_pull_notes_toward_each_other_before_slotting() {
+fn relationships_affect_static_cluster_order() {
     let left = tagged_note("Left", &["alpha"]);
-    let right = tagged_note("Right", &["beta"]);
-    let unrelated = clustered_layout(&index(vec![left.clone(), right.clone()]));
+    let middle = tagged_note("Middle", &["beta"]);
+    let right = tagged_note("Right", &["gamma"]);
+    let unrelated = clustered_layout(&index(vec![left.clone(), middle.clone(), right.clone()]));
 
     let mut linked_left = left;
     let mut linked_right = right;
     linked_left.references.push(linked_right.id.clone());
     linked_right.backlinks.push(linked_left.id.clone());
-    let linked = clustered_layout(&index(vec![linked_left, linked_right]));
+    let linked = clustered_layout(&index(vec![linked_left, middle, linked_right]));
     let left_id = NoteId(PathBuf::from("Left.md"));
     let right_id = NoteId(PathBuf::from("Right.md"));
 
-    assert!(
-        linked.positions[&left_id].distance(linked.positions[&right_id])
-            < unrelated.positions[&left_id].distance(unrelated.positions[&right_id])
-    );
+    assert_ne!(linked.positions[&right_id], unrelated.positions[&right_id]);
+    assert_eq!(linked.positions[&left_id], unrelated.positions[&left_id]);
 }
 
 #[test]
