@@ -42,7 +42,6 @@ fn index(notes: Vec<NoteRecord>) -> VaultIndex {
         root: PathBuf::from("/vault"),
         notes,
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     }
 }
 
@@ -66,7 +65,7 @@ fn assert_no_card_overlaps(layout: &super::BoardLayout) {
 
 fn install_cold_layout(board: &mut super::BoardState, index: &VaultIndex) {
     let layout = prepare_board_layout(index, None);
-    board.install_layout(index.root.clone(), layout, false, std::time::Duration::ZERO);
+    board.install_layout(index.root.clone(), layout, false);
 }
 
 fn pointer_input(screen: Rect, position: Pos2, pressed: bool) -> RawInput {
@@ -229,7 +228,7 @@ fn same_vault_install_preserves_an_intersecting_camera() {
     ]);
     let cold = prepare_board_layout(&vault, None);
     let mut board = super::BoardState::default();
-    board.install_layout(vault.root.clone(), cold, false, std::time::Duration::ZERO);
+    board.install_layout(vault.root.clone(), cold, false);
     let focus = board.positions[&NoteId(PathBuf::from("Alpha.md"))];
     board.camera = Camera {
         center: focus,
@@ -238,7 +237,7 @@ fn same_vault_install_preserves_an_intersecting_camera() {
     board.last_viewport = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_000.0, 700.0)));
     let seed = board.layout_seed(&vault.root).expect("same-root seed");
     let warm = prepare_board_layout(&vault, Some(&seed));
-    board.install_layout(vault.root.clone(), warm, true, std::time::Duration::ZERO);
+    board.install_layout(vault.root.clone(), warm, true);
 
     assert_eq!(board.camera.center, focus);
     assert_eq!(board.camera.scale, 0.75);
@@ -963,7 +962,6 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
         root: PathBuf::from("/vault"),
         notes: vec![note],
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
@@ -1012,7 +1010,6 @@ fn clicking_a_note_emits_a_selection_request() {
         root: PathBuf::from("/vault"),
         notes: vec![selected],
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
@@ -1060,7 +1057,6 @@ fn clicking_a_reference_in_the_side_panel_navigates_to_it() {
         root: PathBuf::from("/vault"),
         notes: vec![source, target],
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
@@ -1093,7 +1089,6 @@ fn snapped_relationship_counts_are_the_only_panel_trigger() {
         root: PathBuf::from("/vault"),
         notes: vec![selected],
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
@@ -1135,7 +1130,6 @@ fn magnetic_zoom_centers_and_snaps_a_note_without_selection() {
         root: PathBuf::from("/vault"),
         notes: vec![selected],
         diagnostics: Vec::new(),
-        scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);

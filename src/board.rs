@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use eframe::egui::{self, Pos2, Rect, Sense, Vec2};
@@ -118,7 +117,6 @@ pub struct BoardState {
     markdown_cache: MarkdownCache,
     layout_root: Option<PathBuf>,
     fingerprints: HashMap<NoteId, PlacementFingerprint>,
-    layout_duration: Duration,
     last_viewport: Option<Rect>,
     pub visible_notes: usize,
 }
@@ -195,7 +193,6 @@ impl BoardState {
         root: PathBuf,
         layout: BoardLayout,
         preserve_view: bool,
-        layout_duration: Duration,
     ) {
         let visible_world = preserve_view.then(|| self.visible_world_rect()).flatten();
         let cluster_mesh = Arc::new(ClusterMesh::from_clusters(&layout.clusters));
@@ -208,7 +205,6 @@ impl BoardState {
             edges: layout.edges,
             content_bounds: layout.content_bounds,
             fingerprints: layout.fingerprints,
-            layout_duration,
             layout_root: Some(root),
             ..Self::default()
         };
@@ -237,8 +233,11 @@ impl BoardState {
         ))
     }
 
-    pub(crate) fn layout_duration(&self) -> Duration {
-        self.layout_duration
+    pub fn zoom_by(&mut self, factor: f32) {
+        let Some(viewport) = self.last_viewport else {
+            return;
+        };
+        self.camera.zoom_at(viewport.center(), factor, viewport);
     }
 
     pub fn request_fit(&mut self) {

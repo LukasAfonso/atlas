@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Instant,
 };
 
 use ignore::WalkBuilder;
@@ -9,8 +8,6 @@ use ignore::WalkBuilder;
 use super::{Diagnostic, VaultIndex, parse_note, resolve_graph};
 
 pub fn scan_vault(root: PathBuf) -> VaultIndex {
-    let started = Instant::now();
-
     if !root.is_dir() {
         return VaultIndex {
             diagnostics: vec![Diagnostic::error(
@@ -18,7 +15,6 @@ pub fn scan_vault(root: PathBuf) -> VaultIndex {
                 format!("Vault is missing or is not a directory: {}", root.display()),
             )],
             root,
-            scan_duration: started.elapsed(),
             ..VaultIndex::default()
         };
     }
@@ -38,7 +34,6 @@ pub fn scan_vault(root: PathBuf) -> VaultIndex {
     VaultIndex {
         root,
         diagnostics,
-        scan_duration: started.elapsed(),
         ..resolve_graph(parsed_notes)
     }
 }

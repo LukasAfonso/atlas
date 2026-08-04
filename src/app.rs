@@ -1,10 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
-use eframe::egui::{self, Color32, RichText, Stroke};
+use eframe::egui::{self, Color32, Pos2, RichText, Stroke};
+use lucide_icons::Icon;
 mod jobs;
 mod registry;
 mod search;
@@ -33,7 +33,6 @@ enum UiAction {
     ForgetVault(PathBuf),
     CancelScan,
     BackToVaults,
-    Rescan(PathBuf),
     SetSelection(Option<NoteId>),
     FocusNote(NoteId),
 }
@@ -80,10 +79,6 @@ impl AtlasApp {
             UiAction::OpenVault(path) => {
                 self.notice = None;
                 self.start_scan(path, context, false);
-            }
-            UiAction::Rescan(path) => {
-                self.notice = None;
-                self.start_scan(path, context, true);
             }
             UiAction::ForgetVault(path) => {
                 self.persisted.forget(&path);
@@ -185,37 +180,21 @@ fn render_vault(
 ) -> Vec<UiAction> {
     let mut actions = Vec::new();
 
-    surface_frame().show(ui, |ui| {
-        ui.horizontal(|ui| {
-            badge(
-                ui,
-                theme::SAGE_DARK,
-                RichText::new("A").strong().color(Color32::WHITE),
-            );
-            ui.vertical(|ui| {
-                ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
-                ui.label(
-                    RichText::new(index.root.display().to_string())
-                        .small()
-                        .color(theme::MUTED),
-                );
-                ui.label(
-                    RichText::new(vault_summary(index, board.layout_duration()))
-                        .size(10.0)
-                        .color(theme::MUTED),
-                );
-            });
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match nav_group(ui, &["⌕ Search", "Fit board", "Rescan", "← Vaults"]) {
-                    Some(0) => search.open(),
-                    Some(1) => board.request_fit(),
-                    Some(2) => actions.push(UiAction::Rescan(index.root.clone())),
-                    Some(3) => actions.push(UiAction::BackToVaults),
-                    _ => {}
-                },
-            );
-        });
+    ui.horizontal(|ui| {
+        identity_pill(ui, index);
+        ui.add_space(8.0);
+        if nav_group(ui, &[(Icon::ArrowLeft, "")]) == Some(0) {
+            actions.push(UiAction::BackToVaults);
+        }
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match nav_group(ui, &[(Icon::Minus, ""), (Icon::Home, ""), (Icon::Plus, "")]) {
+                Some(0) => board.zoom_by(1.0 / 1.2),
+                Some(1) => board.request_fit(),
+                Some(2) => board.zoom_by(1.2),
+                _ => {}
+            },
+        );
     });
     ui.add_space(8.0);
 
@@ -225,6 +204,9 @@ fn render_vault(
         actions.push(UiAction::SetSelection(request.into_selection()));
     }
 
+    render_stats_overlay(ui.ctx(), index);
+    render_search_button(ui.ctx(), search);
+
     if let Some(note_id) = search::render(ui.ctx(), search, index) {
         actions.push(UiAction::FocusNote(note_id));
     }
@@ -232,7 +214,88 @@ fn render_vault(
     actions
 }
 
-fn nav_group(ui: &mut egui::Ui, labels: &[&str]) -> Option<usize> {
+fn identity_pill(ui: &mut egui::Ui, index: &VaultIndex) {
+    egui::Frame::new()
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(14)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                badge(
+                    ui,
+                    theme::SAGE_DARK,
+                    RichText::new("A").strong().color(Color32::WHITE),
+                );
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
+                    ui.label(
+                        RichText::new(index.root.display().to_string())
+                            .small()
+                            .color(theme::MUTED),
+                    );
+                });
+            });
+        });
+}
+
+fn render_search_button(ctx: &egui::Context, search: &mut SearchState) {
+    let screen = ctx.content_rect();
+    let position = Pos2::new(screen.center().x, screen.top() + 18.0);
+    egui::Area::new(egui::Id::new("atlas.search-button"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(position)
+        .pivot(egui::Align2::CENTER_TOP)
+        .show(ctx, |ui| {
+            let response = egui::Frame::new()
+                .fill(theme::PAPER)
+                .stroke(Stroke::new(1.0, theme::LINE))
+                .corner_radius(14)
+                .inner_margin(egui::vec2(14.0, 9.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(theme::icon(Icon::Search, 15.0, theme::MUTED));
+                        ui.label(RichText::new("Search notes…").color(theme::MUTED));
+                    });
+                })
+                .response;
+            let click = ui.interact(
+                response.rect,
+                ui.id().with("search-button-click"),
+                egui::Sense::click(),
+            );
+            if click.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if click.clicked() {
+                search.open();
+            }
+        });
+}
+
+fn render_stats_overlay(ctx: &egui::Context, index: &VaultIndex) {
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::new("atlas.stats"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.left_bottom() + egui::vec2(16.0, -16.0))
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::PAPER)
+                .stroke(Stroke::new(1.0, theme::LINE))
+                .corner_radius(10)
+                .inner_margin(egui::vec2(10.0, 7.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(vault_summary(index))
+                            .size(10.0)
+                            .color(theme::MUTED),
+                    );
+                });
+        });
+}
+
+fn nav_group(ui: &mut egui::Ui, buttons: &[(Icon, &str)]) -> Option<usize> {
     let mut clicked = None;
     egui::Frame::new()
         .fill(theme::PAPER)
@@ -242,16 +305,17 @@ fn nav_group(ui: &mut egui::Ui, labels: &[&str]) -> Option<usize> {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                for (index, label) in labels.iter().enumerate() {
+                for (index, (icon, label)) in buttons.iter().enumerate() {
                     if index > 0 {
                         ui.add_space(2.0);
                         ui.separator();
                         ui.add_space(2.0);
                     }
-                    let button = egui::Button::new(*label)
-                        .frame(false)
-                        .corner_radius(9)
-                        .min_size(egui::vec2(0.0, 30.0));
+                    let button =
+                        egui::Button::new(theme::icon_and_label(*icon, label, 15.0, theme::INK))
+                            .frame(false)
+                            .corner_radius(9)
+                            .min_size(egui::vec2(38.0, 38.0));
                     if ui.add(button).clicked() {
                         clicked = Some(index);
                     }
@@ -321,17 +385,15 @@ impl Drop for AtlasApp {
     }
 }
 
-fn vault_summary(index: &VaultIndex, layout_duration: Duration) -> String {
+fn vault_summary(index: &VaultIndex) -> String {
     let (warnings, errors) = index.diagnostic_counts();
     format!(
-        "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  scan {:.0} ms  ·  layout {:.0} ms",
+        "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues",
         index.notes.len(),
         index.reference_count(),
         index.backlink_count(),
         index.unique_citation_count(),
         warnings + errors,
-        index.scan_duration.as_secs_f64() * 1_000.0,
-        layout_duration.as_secs_f64() * 1_000.0,
     )
 }
 

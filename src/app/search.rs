@@ -2,6 +2,7 @@ use eframe::egui::{
     self, Color32, CursorIcon, Frame, Id, Key, Order, Pos2, Rect, RichText, Sense, Stroke,
     TextEdit, Vec2,
 };
+use lucide_icons::Icon;
 
 use crate::theme;
 use crate::vault::{NoteId, VaultIndex};
@@ -16,6 +17,7 @@ pub(super) struct SearchState {
     query: String,
     active: usize,
     focus_requested: bool,
+    just_opened: bool,
 }
 
 impl SearchState {
@@ -26,6 +28,7 @@ impl SearchState {
     pub(super) fn open(&mut self) {
         self.open = true;
         self.focus_requested = true;
+        self.just_opened = true;
     }
 
     fn close(&mut self) {
@@ -104,6 +107,7 @@ pub(super) fn render(
     if !state.open {
         return None;
     }
+    let just_opened = std::mem::take(&mut state.just_opened);
 
     let screen = ctx.content_rect();
     let hits = search(index, &state.query);
@@ -153,7 +157,7 @@ pub(super) fn render(
                     .inner_margin(14)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("⌕").color(theme::MUTED));
+                            ui.label(theme::icon(Icon::Search, 16.0, theme::MUTED));
                             let edit = ui.add(
                                 TextEdit::singleline(&mut state.query)
                                     .hint_text("Find a note, tag, or phrase…")
@@ -234,13 +238,14 @@ pub(super) fn render(
             panel_rect = panel.response.rect;
         });
 
-    let click_outside = ctx.input(|input| {
-        input.pointer.primary_clicked()
-            && input
-                .pointer
-                .interact_pos()
-                .is_some_and(|position| !panel_rect.contains(position))
-    });
+    let click_outside = !just_opened
+        && ctx.input(|input| {
+            input.pointer.primary_clicked()
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|position| !panel_rect.contains(position))
+        });
 
     if chosen.is_some() || click_outside || escape_pressed {
         state.close();
@@ -276,7 +281,6 @@ mod tests {
             root: PathBuf::from("/vault"),
             notes,
             diagnostics: Vec::new(),
-            scan_duration: std::time::Duration::ZERO,
         }
     }
 

@@ -7,7 +7,7 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use eframe::egui;
@@ -24,7 +24,6 @@ struct ScanEnvelope {
     generation: u64,
     index: VaultIndex,
     layout: BoardLayout,
-    layout_duration: Duration,
     preserve_view: bool,
 }
 
@@ -62,15 +61,12 @@ impl AtlasApp {
             if worker_cancelled.load(Ordering::Acquire) {
                 return;
             }
-            let layout_started = Instant::now();
             let layout = prepare_board_layout(&index, seed.as_ref());
-            let layout_duration = layout_started.elapsed();
             if !worker_cancelled.load(Ordering::Acquire) {
                 let _ = sender.send(ScanEnvelope {
                     generation,
                     index,
                     layout,
-                    layout_duration,
                     preserve_view,
                 });
                 worker_context.request_repaint();
@@ -127,7 +123,6 @@ impl AtlasApp {
             envelope.index.root.clone(),
             envelope.layout,
             envelope.preserve_view,
-            envelope.layout_duration,
         );
         self.screen = AppScreen::Vault {
             index: envelope.index,

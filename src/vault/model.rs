@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NoteId(pub PathBuf);
@@ -84,7 +84,6 @@ pub struct VaultIndex {
     pub root: PathBuf,
     pub notes: Vec<NoteRecord>,
     pub diagnostics: Vec<Diagnostic>,
-    pub scan_duration: Duration,
 }
 
 impl VaultIndex {

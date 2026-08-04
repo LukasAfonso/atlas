@@ -1,4 +1,12 @@
-use eframe::egui::{self, Color32, FontId, Stroke, TextStyle};
+use std::sync::Arc;
+
+use eframe::egui::{
+    self, Color32, FontData, FontDefinitions, FontFamily, FontId, RichText, Stroke, TextStyle,
+    text::{LayoutJob, TextFormat},
+};
+use lucide_icons::{Icon, LUCIDE_FONT_BYTES};
+
+const ICON_FONT: &str = "lucide";
 
 pub const INK: Color32 = Color32::from_rgb(32, 36, 31);
 pub const MUTED: Color32 = Color32::from_rgb(111, 118, 108);
@@ -14,6 +22,17 @@ pub const ERROR: Color32 = Color32::from_rgb(151, 58, 52);
 pub const BODY_FONT_SIZE: f32 = 14.0;
 
 pub fn apply(context: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        ICON_FONT.to_owned(),
+        Arc::new(FontData::from_static(LUCIDE_FONT_BYTES)),
+    );
+    fonts.families.insert(
+        FontFamily::Name(ICON_FONT.into()),
+        vec![ICON_FONT.to_owned()],
+    );
+    context.set_fonts(fonts);
+
     let mut visuals = egui::Visuals::light();
     visuals.override_text_color = Some(INK);
     visuals.panel_fill = CANVAS;
@@ -58,4 +77,31 @@ pub fn apply(context: &egui::Context) {
             .text_styles
             .insert(TextStyle::Small, FontId::proportional(11.0));
     });
+}
+
+fn icon_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(ICON_FONT.into()))
+}
+
+pub fn icon(icon: Icon, size: f32, color: Color32) -> RichText {
+    RichText::new(char::from(icon).to_string())
+        .font(icon_font(size))
+        .color(color)
+}
+
+pub fn icon_and_label(icon: Icon, label: &str, size: f32, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.append(
+        &char::from(icon).to_string(),
+        0.0,
+        TextFormat::simple(icon_font(size), color),
+    );
+    if !label.is_empty() {
+        job.append(
+            label,
+            7.0,
+            TextFormat::simple(FontId::proportional(size * 0.72), color),
+        );
+    }
+    job
 }

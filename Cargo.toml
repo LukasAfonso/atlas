@@ -8,6 +8,7 @@ publish = false
 bytemuck = { version = "1", features = ["derive"] }
 eframe = { version = "0.35.0", features = ["persistence"] }
 ignore = "0.4.32"
+lucide-icons = "1.28.0"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 pollster = "0.4"
 rfd = "0.17.2"
