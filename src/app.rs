@@ -11,7 +11,7 @@ mod registry;
 use jobs::{FolderPickerJob, ScanJob};
 use registry::PersistedState;
 
-use crate::board::BoardState;
+use crate::board::{BoardState, initialize_cluster_renderer};
 use crate::theme;
 use crate::vault::{DiagnosticSeverity, NoteId, VaultIndex};
 
@@ -55,6 +55,7 @@ impl AtlasApp {
         persisted.deduplicate();
 
         theme::apply(&creation_context.egui_ctx);
+        initialize_cluster_renderer(creation_context);
 
         Self {
             persisted,
@@ -137,99 +138,99 @@ impl AtlasApp {
         }
         actions
     }
+}
 
-    fn render_scanning(&self, ui: &mut egui::Ui, root: &Path, generation: u64) -> Vec<UiAction> {
-        let mut actions = Vec::new();
-        ui.centered_and_justified(|ui| {
-            surface_frame().show(ui, |ui| {
-                ui.set_min_width(420.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(14.0);
-                    ui.spinner();
-                    ui.label(RichText::new("Scanning vault").size(20.0).strong());
-                    ui.label(RichText::new(root.display().to_string()).color(theme::MUTED));
-                    ui.label(
-                        RichText::new(format!("INDEX PASS {generation}"))
-                            .size(10.0)
-                            .color(theme::MUTED),
-                    );
-                    ui.add_space(12.0);
-                    if ui.add(quiet_button("Cancel")).clicked() {
-                        actions.push(UiAction::CancelScan);
-                    }
-                    ui.add_space(8.0);
-                });
-            });
-        });
-        actions
-    }
-
-    fn render_vault(
-        ui: &mut egui::Ui,
-        index: &VaultIndex,
-        board: &mut BoardState,
-        selected_note: Option<&NoteId>,
-    ) -> Vec<UiAction> {
-        let mut actions = Vec::new();
-
+fn render_scanning(ui: &mut egui::Ui, root: &Path, generation: u64) -> Vec<UiAction> {
+    let mut actions = Vec::new();
+    ui.centered_and_justified(|ui| {
         surface_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                badge(
-                    ui,
-                    theme::SAGE_DARK,
-                    RichText::new("A").strong().color(Color32::WHITE),
+            ui.set_min_width(420.0);
+            ui.vertical_centered(|ui| {
+                ui.add_space(14.0);
+                ui.spinner();
+                ui.label(RichText::new("Scanning vault").size(20.0).strong());
+                ui.label(RichText::new(root.display().to_string()).color(theme::MUTED));
+                ui.label(
+                    RichText::new(format!("INDEX PASS {generation}"))
+                        .size(10.0)
+                        .color(theme::MUTED),
                 );
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
-                    ui.label(
-                        RichText::new(index.root.display().to_string())
-                            .small()
-                            .color(theme::MUTED),
-                    );
-                    ui.label(
-                        RichText::new(vault_summary(index, board.layout_duration()))
-                            .size(10.0)
-                            .color(theme::MUTED),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(quiet_button("← Vaults")).clicked() {
-                        actions.push(UiAction::BackToVaults);
-                    }
-                    if ui.add(quiet_button("Rescan")).clicked() {
-                        actions.push(UiAction::Rescan(index.root.clone()));
-                    }
-                    if ui.add(quiet_button("Fit board")).clicked() {
-                        board.request_fit();
-                    }
-                });
+                ui.add_space(12.0);
+                if ui.add(quiet_button("Cancel")).clicked() {
+                    actions.push(UiAction::CancelScan);
+                }
+                ui.add_space(8.0);
             });
         });
-        ui.add_space(8.0);
+    });
+    actions
+}
 
-        if index.notes.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new("This vault has no Markdown notes")
-                            .size(20.0)
-                            .strong(),
-                    );
-                    ui.label(
-                        RichText::new("Add a .md file and rescan when you are ready.")
-                            .color(theme::MUTED),
-                    );
-                });
+fn render_vault(
+    ui: &mut egui::Ui,
+    index: &VaultIndex,
+    board: &mut BoardState,
+    selected_note: Option<&NoteId>,
+) -> Vec<UiAction> {
+    let mut actions = Vec::new();
+
+    surface_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            badge(
+                ui,
+                theme::SAGE_DARK,
+                RichText::new("A").strong().color(Color32::WHITE),
+            );
+            ui.vertical(|ui| {
+                ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
+                ui.label(
+                    RichText::new(index.root.display().to_string())
+                        .small()
+                        .color(theme::MUTED),
+                );
+                ui.label(
+                    RichText::new(vault_summary(index, board.layout_duration()))
+                        .size(10.0)
+                        .color(theme::MUTED),
+                );
             });
-        } else {
-            let board_output = board.show(ui, index, selected_note);
-            if let Some(selection) = board_output.selection_request {
-                actions.push(UiAction::SetSelection(selection));
-            }
-        }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(quiet_button("← Vaults")).clicked() {
+                    actions.push(UiAction::BackToVaults);
+                }
+                if ui.add(quiet_button("Rescan")).clicked() {
+                    actions.push(UiAction::Rescan(index.root.clone()));
+                }
+                if ui.add(quiet_button("Fit board")).clicked() {
+                    board.request_fit();
+                }
+            });
+        });
+    });
+    ui.add_space(8.0);
 
-        actions
+    if index.notes.is_empty() {
+        render_empty_vault(ui);
+    } else if let Some(request) = board.show(ui, index, selected_note) {
+        actions.push(UiAction::SetSelection(request.into_selection()));
     }
+
+    actions
+}
+
+fn render_empty_vault(ui: &mut egui::Ui) {
+    ui.centered_and_justified(|ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(
+                RichText::new("This vault has no Markdown notes")
+                    .size(20.0)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("Add a .md file and rescan when you are ready.").color(theme::MUTED),
+            );
+        });
+    });
 }
 
 impl eframe::App for AtlasApp {
@@ -248,10 +249,10 @@ impl eframe::App for AtlasApp {
                 match &self.screen {
                     AppScreen::VaultList => self.render_vault_list(ui),
                     AppScreen::Scanning { root, generation } => {
-                        self.render_scanning(ui, root, *generation)
+                        render_scanning(ui, root, *generation)
                     }
                     AppScreen::Vault { index } => {
-                        Self::render_vault(ui, index, &mut self.board, self.selected_note.as_ref())
+                        render_vault(ui, index, &mut self.board, self.selected_note.as_ref())
                     }
                 }
             })

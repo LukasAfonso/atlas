@@ -185,7 +185,7 @@ impl MarkdownStyle {
             }
             Tag::Item => append(job, "• ", self.format(base_size)),
             Tag::FootnoteDefinition(label) => {
-                append(job, &format!("[{label}] "), self.format(base_size * 0.9))
+                append(job, &format!("[{label}] "), self.format(base_size * 0.9));
             }
             Tag::Link { .. } => self.link_depth += 1,
             Tag::TableCell if !job.text.ends_with(['\n', ' ']) => {

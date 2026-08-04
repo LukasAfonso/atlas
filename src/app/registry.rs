@@ -8,20 +8,15 @@ pub(super) struct PersistedState {
 }
 
 impl PersistedState {
-    pub(super) fn register(&mut self, path: PathBuf) -> bool {
-        if self.vaults.iter().any(|existing| existing == &path) {
-            false
-        } else {
+    pub(super) fn register(&mut self, path: PathBuf) {
+        if !self.vaults.contains(&path) {
             self.vaults.push(path);
             self.vaults.sort_by_key(|path| path_key(path));
-            true
         }
     }
 
-    pub(super) fn forget(&mut self, path: &Path) -> bool {
-        let original_len = self.vaults.len();
+    pub(super) fn forget(&mut self, path: &Path) {
         self.vaults.retain(|existing| existing != path);
-        self.vaults.len() != original_len
     }
 
     pub(super) fn deduplicate(&mut self) {
@@ -47,8 +42,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = fs::canonicalize(directory.path()).unwrap();
         let mut state = PersistedState::default();
-        assert!(state.register(path.clone()));
-        assert!(!state.register(path));
+        state.register(path.clone());
+        state.register(path);
         assert_eq!(state.vaults.len(), 1);
     }
 
@@ -58,7 +53,7 @@ mod tests {
         let path = fs::canonicalize(directory.path()).unwrap();
         let mut state = PersistedState::default();
         state.register(path.clone());
-        assert!(state.forget(&path));
+        state.forget(&path);
         assert!(path.exists());
         assert!(state.vaults.is_empty());
     }

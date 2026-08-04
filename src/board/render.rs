@@ -1,15 +1,15 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use eframe::egui::{
-    Align2, Color32, FontId, Galley, Pos2, Rect, Stroke, StrokeKind, Vec2,
-    epaint::{Mesh, PathShape, Vertex, WHITE_UV},
+    Align2, Color32, FontId, Galley, Pos2, Rect, Stroke, StrokeKind, Vec2, epaint::PathShape,
 };
 
 use super::{
-    BoardState, DetailLevel, NOTE_HEADER_RESERVED_HEIGHT, NOTE_PADDING_WORLD, title_lod_progress,
+    BoardState, DetailLevel, Focus, NOTE_HEADER_RESERVED_HEIGHT, NOTE_PADDING_WORLD,
+    title_lod_progress,
 };
 use crate::theme;
-use crate::vault::{NoteId, NoteRecord};
+use crate::vault::NoteRecord;
 
 pub(super) const READABLE_TITLE_FONT_SIZE: f32 = 14.0;
 const NOTE_BADGE_SIZE: f32 = 34.0;
@@ -51,34 +51,16 @@ impl BoardState {
     }
 
     pub(super) fn paint_cluster_regions(&self, painter: &eframe::egui::Painter, viewport: Rect) {
+        self.paint_cluster_fill(painter, viewport);
         for cluster in &self.clusters {
             let bounds = Rect::from_min_max(
-                self.camera.world_to_screen(cluster.bounds.min, viewport),
-                self.camera.world_to_screen(cluster.bounds.max, viewport),
+                self.camera.world_to_screen(cluster.bounds().min, viewport),
+                self.camera.world_to_screen(cluster.bounds().max, viewport),
             );
             if !viewport.intersects(bounds) {
                 continue;
             }
             let color = cluster_color(&cluster.key);
-            let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
-            let mut mesh = Mesh::default();
-            mesh.vertices.reserve(cluster.geometry.vertices.len());
-            mesh.vertices
-                .extend(
-                    cluster
-                        .geometry
-                        .vertices
-                        .iter()
-                        .copied()
-                        .map(|position| Vertex {
-                            pos: self.camera.world_to_screen(position, viewport),
-                            uv: WHITE_UV,
-                            color: fill,
-                        }),
-                );
-            mesh.indices
-                .extend(cluster.geometry.indices.iter().copied());
-            painter.add(mesh);
             let outline = Stroke::new(
                 1.5,
                 Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 92),
@@ -132,17 +114,15 @@ impl BoardState {
         &self,
         painter: &eframe::egui::Painter,
         viewport: Rect,
-        focus_note: Option<&NoteId>,
-        isolated: bool,
-        related: &HashSet<NoteId>,
-        unrelated_opacity: f32,
+        focus: &Focus<'_>,
     ) {
         let color = Color32::from_rgba_unmultiplied(71, 104, 88, 46);
+        let focus_note = focus.focal.as_ref().map(|focal| &focal.note.id);
         for edge in &self.edges {
-            if isolated
+            if focus.isolated
                 && !focus_note.is_some_and(|selected| {
-                    (&edge.source == selected && related.contains(&edge.target))
-                        || (&edge.target == selected && related.contains(&edge.source))
+                    (&edge.source == selected && focus.related.contains(&edge.target))
+                        || (&edge.target == selected && focus.related.contains(&edge.source))
                 })
             {
                 continue;
@@ -154,7 +134,7 @@ impl BoardState {
                     .is_some_and(|selected| &edge.source == selected || &edge.target == selected);
                 let mut edge_painter = painter.clone();
                 if focus_note.is_some() && !incident_to_selection {
-                    edge_painter.set_opacity(unrelated_opacity);
+                    edge_painter.set_opacity(focus.unrelated_opacity);
                 }
                 edge_painter.line_segment([source, target], Stroke::new(1.0, color));
             }
@@ -197,9 +177,13 @@ impl BoardState {
             rect,
             padding,
             font_sizes.title,
-            level,
-            title_offset,
-            title_lod_progress(scale),
+            note_title_position(
+                rect,
+                padding,
+                level,
+                title_offset,
+                title_lod_progress(scale),
+            ),
         );
 
         if level != DetailLevel::Content {
@@ -340,9 +324,7 @@ fn paint_note_title(
     rect: Rect,
     padding: Vec2,
     font_size: f32,
-    level: DetailLevel,
-    header_offset: f32,
-    title_progress: f32,
+    position: Pos2,
 ) -> f32 {
     let galley = painter.layout(
         note.title.clone(),
@@ -350,7 +332,6 @@ fn paint_note_title(
         theme::INK,
         (rect.width() - padding.x * 2.0).max(1.0),
     );
-    let position = note_title_position(rect, padding, level, header_offset, title_progress);
     let bottom = position.y + galley.size().y;
     paint_bold_galley(painter, position, galley);
     bottom
@@ -569,11 +550,10 @@ pub(super) fn font_sizes(level: DetailLevel, scale: f32) -> FontSizes {
 }
 
 fn note_color(note: &NoteRecord) -> Color32 {
-    let value = note.tags.first().map(String::as_str).unwrap_or(&note.title);
-    cluster_color(value)
+    cluster_color(note.tags.first().map_or(&note.title, String::as_str))
 }
 
-fn cluster_color(value: &str) -> Color32 {
+pub(super) fn cluster_color(value: &str) -> Color32 {
     const PALETTE: [Color32; 12] = [
         Color32::from_rgb(59, 113, 90),
         Color32::from_rgb(165, 102, 42),

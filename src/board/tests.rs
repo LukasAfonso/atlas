@@ -5,12 +5,11 @@ use eframe::egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 use super::metaballs::{BASE_INFLUENCE_RADIUS, FIELD_CELL_BUDGET, build_geometry};
 use super::{
     CARD_SIZE, Camera, DetailLevel, FADE_START_THRESHOLD, GRID_SPACING, ISOLATION_THRESHOLD,
-    LayoutSeed, READABLE_TITLE_FONT_SIZE, SNAP_MAGNET_THRESHOLD, SNAP_THRESHOLD,
+    LayoutSeed, READABLE_TITLE_FONT_SIZE, SNAP_MAGNET_THRESHOLD, SNAP_THRESHOLD, SelectionRequest,
     body_typography_scale, body_visible, card_width_ratio, clustered_layout, detail_level,
     font_sizes, magnetized_note_rect, note_body_rect, note_footer_visible, note_padding,
     note_title_position, note_typography_scale, note_viewport_coverage, prepare_board_layout,
-    related_note_ids, resolved_edges, snap_magnet_progress, title_card_size, toggled_selection,
-    unrelated_opacity,
+    related_note_ids, resolved_edges, snap_magnet_progress, title_card_size, unrelated_opacity,
 };
 use crate::markdown::CARD_BODY_FONT_WORLD;
 use crate::theme;
@@ -132,7 +131,7 @@ fn clustered_layout_is_rescan_stable_and_non_overlapping() {
     for (left, right) in first.clusters.iter().zip(&second.clusters) {
         assert_eq!(left.key, right.key);
         assert_eq!(left.name, right.name);
-        assert_eq!(left.bounds, right.bounds);
+        assert_eq!(left.bounds(), right.bounds());
         assert_eq!(left.label_anchor, right.label_anchor);
         assert_eq!(left.note_count, right.note_count);
         assert_eq!(left.influence_radius, right.influence_radius);
@@ -187,7 +186,7 @@ fn co_occurring_tags_are_closer_than_unrelated_tags() {
             .iter()
             .find(|cluster| cluster.name == name)
             .expect("named cluster")
-            .bounds
+            .bounds()
             .center()
     };
     assert!(center("alpha").distance(center("beta")) < center("gamma").distance(center("delta")));
@@ -243,7 +242,7 @@ fn same_vault_install_preserves_an_intersecting_camera() {
 
     assert_eq!(board.camera.center, focus);
     assert_eq!(board.camera.scale, 0.75);
-    assert!(!board.needs_fit);
+    assert!(board.fitted);
 }
 
 #[test]
@@ -430,8 +429,8 @@ fn benchmark_metaball_preparation() {
             let warm_duration = started.elapsed();
             let positions: Vec<_> = cold.positions.values().copied().collect();
             let started = Instant::now();
-            let (_, _, cells) =
-                build_geometry(&positions, BASE_INFLUENCE_RADIUS, cold.stats.field_step);
+            let cells = build_geometry(&positions, BASE_INFLUENCE_RADIUS, cold.stats.field_step)
+                .sampled_cells;
             let field_duration = started.elapsed();
             eprintln!(
                 "notes={count} memberships={memberships} cold_ms={:.1} warm_ms={:.1} field_ms={:.1} sampled_cells={} isolated_field_cells={cells} passes={} fallbacks={} max_radius={:.0} step={:.0}",
@@ -479,8 +478,8 @@ fn independent_cluster_regions_use_compact_two_slot_spacing() {
         !Rect::from_center_size(alpha_position, CARD_SIZE)
             .intersects(Rect::from_center_size(beta_position, CARD_SIZE))
     );
-    assert!(alpha.bounds.contains(alpha_position));
-    assert!(beta.bounds.contains(beta_position));
+    assert!(alpha.bounds().contains(alpha_position));
+    assert!(beta.bounds().contains(beta_position));
 }
 
 #[test]
@@ -526,8 +525,8 @@ fn multi_tag_notes_contribute_to_each_connected_cluster() {
         .find(|cluster| cluster.name == "beta")
         .expect("beta cluster");
     let bridge = layout.positions[&NoteId(PathBuf::from("Bridge.md"))];
-    assert!(alpha.bounds.contains(bridge));
-    assert!(beta.bounds.contains(bridge));
+    assert!(alpha.bounds().contains(bridge));
+    assert!(beta.bounds().contains(bridge));
     assert_eq!(alpha.note_count, 2);
     assert_eq!(beta.note_count, 2);
     assert_eq!(alpha.geometry.contours.len(), 1);
@@ -555,7 +554,7 @@ fn all_cluster_geometry_is_connected_with_intervening_tags() {
             cluster.name,
             cluster.note_count,
             cluster.influence_radius,
-            cluster.bounds,
+            cluster.bounds(),
             cluster.geometry.vertices.len(),
             cluster.geometry.indices.len(),
             layout.stats.field_step,
@@ -920,7 +919,7 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
-    board.needs_fit = false;
+    board.fitted = true;
     board.select_note(Some(&selected_id));
     board.camera.scale = 1_000.0 * SNAP_THRESHOLD / CARD_SIZE.x;
     let pre_snap_camera = board.camera;
@@ -969,7 +968,7 @@ fn clicking_a_note_emits_a_selection_request() {
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
-    board.needs_fit = false;
+    board.fitted = true;
 
     let context = eframe::egui::Context::default();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_000.0, 700.0));
@@ -979,10 +978,10 @@ fn clicking_a_note_emits_a_selection_request() {
         board.show(ui, &index, None);
     });
     let _ = context.run_ui(pointer_input(screen, pointer, false), |ui| {
-        selection = board.show(ui, &index, None).selection_request;
+        selection = board.show(ui, &index, None);
     });
 
-    assert_eq!(selection, Some(Some(selected_id.clone())));
+    assert!(matches!(selection, Some(SelectionRequest::Select(ref id)) if *id == selected_id));
     board.select_note(Some(&selected_id));
     assert!(board.relationship_panel_open);
 }
@@ -992,14 +991,14 @@ fn clicking_the_selected_note_requests_deselection() {
     let selected = note("Selected");
     let selected_id = selected.id.clone();
 
-    assert_eq!(
-        toggled_selection(Some(selected_id.clone()), Some(&selected_id)),
-        None
-    );
-    assert_eq!(
-        toggled_selection(Some(selected_id.clone()), None),
-        Some(selected_id)
-    );
+    assert!(matches!(
+        SelectionRequest::toggled(Some(selected_id.clone()), Some(&selected_id)),
+        SelectionRequest::Clear
+    ));
+    assert!(matches!(
+        SelectionRequest::toggled(Some(selected_id.clone()), None),
+        SelectionRequest::Select(id) if id == selected_id
+    ));
 }
 
 #[test]
@@ -1017,7 +1016,7 @@ fn clicking_a_reference_in_the_side_panel_navigates_to_it() {
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
-    board.needs_fit = false;
+    board.fitted = true;
     board.select_note(Some(&source_id));
 
     let context = eframe::egui::Context::default();
@@ -1032,10 +1031,10 @@ fn clicking_a_reference_in_the_side_panel_navigates_to_it() {
         board.show(ui, &index, Some(&source_id));
     });
     let _ = context.run_ui(pointer_input(screen, pointer, false), |ui| {
-        selection = board.show(ui, &index, Some(&source_id)).selection_request;
+        selection = board.show(ui, &index, Some(&source_id));
     });
 
-    assert_eq!(selection, Some(Some(target_id)));
+    assert!(matches!(selection, Some(SelectionRequest::Select(id)) if id == target_id));
 }
 
 #[test]
@@ -1050,7 +1049,7 @@ fn snapped_relationship_counts_are_the_only_panel_trigger() {
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
-    board.needs_fit = false;
+    board.fitted = true;
     board.select_note(Some(&selected_id));
 
     let context = eframe::egui::Context::default();
@@ -1065,9 +1064,9 @@ fn snapped_relationship_counts_are_the_only_panel_trigger() {
         board.show(ui, &index, None);
     });
     let _ = context.run_ui(pointer_input(screen, note_body, false), |ui| {
-        body_selection = board.show(ui, &index, None).selection_request;
+        body_selection = board.show(ui, &index, None);
     });
-    assert_eq!(body_selection, None);
+    assert!(body_selection.is_none());
     assert!(!board.relationship_panel_open);
 
     let relationship_counts = Pos2::new(900.0, 660.0);
@@ -1092,7 +1091,7 @@ fn magnetic_zoom_centers_and_snaps_a_note_without_selection() {
     };
     let mut board = super::BoardState::default();
     install_cold_layout(&mut board, &index);
-    board.needs_fit = false;
+    board.fitted = true;
 
     let context = eframe::egui::Context::default();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1_000.0, 700.0));

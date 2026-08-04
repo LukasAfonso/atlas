@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+bytemuck = { version = "1", features = ["derive"] }
 eframe = { version = "0.35.0", features = ["persistence"] }
 ignore = "0.4.32"
 pulldown-cmark = { version = "0.13.4", default-features = false }

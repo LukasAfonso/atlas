@@ -6,103 +6,13 @@ use std::{
 use super::{Diagnostic, NoteId, NoteRecord, ParsedNote, ReferenceKind, VaultIndex};
 
 pub fn resolve_graph(notes: Vec<ParsedNote>) -> VaultIndex {
-    let ids: HashSet<NoteId> = notes
-        .iter()
-        .map(|note| NoteId(normalize_note_path(&note.relative_path)))
+    let index = NoteLookups::new(&notes);
+    let mut records: Vec<_> = notes
+        .into_iter()
+        .map(|note| resolve_note(note, &index))
         .collect();
 
-    let mut stems: HashMap<String, Vec<NoteId>> = HashMap::new();
-    let mut aliases: HashMap<String, Vec<NoteId>> = HashMap::new();
-    for note in &notes {
-        let id = NoteId(normalize_note_path(&note.relative_path));
-        if let Some(stem) = note
-            .relative_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-        {
-            stems
-                .entry(stem.to_lowercase())
-                .or_default()
-                .push(id.clone());
-        }
-        for alias in &note.aliases {
-            aliases
-                .entry(alias.to_lowercase())
-                .or_default()
-                .push(id.clone());
-        }
-    }
-
-    let mut records = Vec::with_capacity(notes.len());
-    for note in notes {
-        let id = NoteId(normalize_note_path(&note.relative_path));
-        let source_directory = id.0.parent().unwrap_or_else(|| Path::new(""));
-        let mut diagnostics = note.diagnostics;
-        let mut resolved = Vec::new();
-        let mut seen = HashSet::new();
-
-        for reference in note.unresolved_references {
-            match resolve_reference(
-                source_directory,
-                &reference.raw,
-                reference.kind,
-                &ids,
-                &stems,
-                &aliases,
-            ) {
-                Resolution::Resolved(target) => {
-                    if seen.insert(target.clone()) {
-                        resolved.push(target);
-                    }
-                }
-                Resolution::Unresolved => diagnostics.push(Diagnostic::warning(
-                    Some(note.relative_path.clone()),
-                    format!("Unresolved note reference: {}", reference.raw),
-                )),
-                Resolution::Ambiguous(matches) => diagnostics.push(Diagnostic::warning(
-                    Some(note.relative_path.clone()),
-                    format!(
-                        "Ambiguous note reference `{}` matches: {}",
-                        reference.raw,
-                        matches
-                            .iter()
-                            .map(NoteId::display)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )),
-            }
-        }
-
-        records.push(NoteRecord {
-            id,
-            relative_path: note.relative_path,
-            title: note.title,
-            markdown_body: note.markdown_body,
-            aliases: note.aliases,
-            tags: note.tags,
-            references: resolved,
-            backlinks: Vec::new(),
-            citations: note.citations,
-            diagnostics,
-        });
-    }
-
-    let mut backlinks: HashMap<NoteId, Vec<NoteId>> = HashMap::new();
-    for record in &records {
-        for target in &record.references {
-            backlinks
-                .entry(target.clone())
-                .or_default()
-                .push(record.id.clone());
-        }
-    }
-    for record in &mut records {
-        if let Some(sources) = backlinks.remove(&record.id) {
-            record.backlinks = sources;
-        }
-    }
-
+    attach_backlinks(&mut records);
     records.sort_by(|left, right| {
         left.title
             .to_lowercase()
@@ -116,6 +26,108 @@ pub fn resolve_graph(notes: Vec<ParsedNote>) -> VaultIndex {
     }
 }
 
+struct NoteLookups {
+    ids: HashSet<NoteId>,
+    stems: HashMap<String, Vec<NoteId>>,
+    aliases: HashMap<String, Vec<NoteId>>,
+}
+
+impl NoteLookups {
+    fn new(notes: &[ParsedNote]) -> Self {
+        let mut lookups = Self {
+            ids: HashSet::with_capacity(notes.len()),
+            stems: HashMap::new(),
+            aliases: HashMap::new(),
+        };
+        for note in notes {
+            let id = NoteId(normalize_note_path(&note.relative_path));
+            if let Some(stem) = note
+                .relative_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+            {
+                lookups
+                    .stems
+                    .entry(stem.to_lowercase())
+                    .or_default()
+                    .push(id.clone());
+            }
+            for alias in &note.aliases {
+                lookups
+                    .aliases
+                    .entry(alias.to_lowercase())
+                    .or_default()
+                    .push(id.clone());
+            }
+            lookups.ids.insert(id);
+        }
+        lookups
+    }
+}
+
+fn resolve_note(note: ParsedNote, lookups: &NoteLookups) -> NoteRecord {
+    let id = NoteId(normalize_note_path(&note.relative_path));
+    let source_directory = id.0.parent().unwrap_or_else(|| Path::new(""));
+    let mut diagnostics = note.diagnostics;
+    let mut references = Vec::new();
+
+    for reference in note.unresolved_references {
+        match resolve_reference(source_directory, &reference.raw, reference.kind, lookups) {
+            Resolution::Resolved(target) => {
+                if !references.contains(&target) {
+                    references.push(target);
+                }
+            }
+            Resolution::Unresolved => diagnostics.push(Diagnostic::warning(
+                Some(note.relative_path.clone()),
+                format!("Unresolved note reference: {}", reference.raw),
+            )),
+            Resolution::Ambiguous(matches) => diagnostics.push(Diagnostic::warning(
+                Some(note.relative_path.clone()),
+                format!(
+                    "Ambiguous note reference `{}` matches: {}",
+                    reference.raw,
+                    matches
+                        .iter()
+                        .map(NoteId::display)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
+    }
+
+    NoteRecord {
+        id,
+        relative_path: note.relative_path,
+        title: note.title,
+        markdown_body: note.markdown_body,
+        aliases: note.aliases,
+        tags: note.tags,
+        references,
+        backlinks: Vec::new(),
+        citations: note.citations,
+        diagnostics,
+    }
+}
+
+fn attach_backlinks(records: &mut [NoteRecord]) {
+    let mut backlinks: HashMap<NoteId, Vec<NoteId>> = HashMap::new();
+    for record in &*records {
+        for target in &record.references {
+            backlinks
+                .entry(target.clone())
+                .or_default()
+                .push(record.id.clone());
+        }
+    }
+    for record in records {
+        if let Some(sources) = backlinks.remove(&record.id) {
+            record.backlinks = sources;
+        }
+    }
+}
+
 enum Resolution {
     Resolved(NoteId),
     Unresolved,
@@ -126,36 +138,32 @@ fn resolve_reference(
     source_directory: &Path,
     raw: &str,
     kind: ReferenceKind,
-    ids: &HashSet<NoteId>,
-    stems: &HashMap<String, Vec<NoteId>>,
-    aliases: &HashMap<String, Vec<NoteId>>,
+    lookups: &NoteLookups,
 ) -> Resolution {
     let raw_path = PathBuf::from(raw.replace('\\', "/"));
     let path_with_extension = with_markdown_extension(raw_path, kind);
 
-    if let Some(relative) = normalize_relative(&source_directory.join(&path_with_extension)) {
-        let candidate = NoteId(relative);
-        if ids.contains(&candidate) {
+    let paths = [
+        source_directory.join(&path_with_extension),
+        path_with_extension.clone(),
+    ];
+    for path in &paths {
+        if let Some(candidate) = normalize_relative(path).map(NoteId)
+            && lookups.ids.contains(&candidate)
+        {
             return Resolution::Resolved(candidate);
         }
     }
 
-    if let Some(vault_relative) = normalize_relative(&path_with_extension) {
-        let candidate = NoteId(vault_relative);
-        if ids.contains(&candidate) {
-            return Resolution::Resolved(candidate);
-        }
-    }
-
-    let lookup = path_with_extension
+    let stem = path_with_extension
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or(raw)
         .to_lowercase();
-    if let Some(matches) = stems.get(&lookup) {
+    if let Some(matches) = lookups.stems.get(&stem) {
         return unique_or_ambiguous(matches);
     }
-    if let Some(matches) = aliases.get(&raw.to_lowercase()) {
+    if let Some(matches) = lookups.aliases.get(&raw.to_lowercase()) {
         return unique_or_ambiguous(matches);
     }
     Resolution::Unresolved

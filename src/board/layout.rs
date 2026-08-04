@@ -19,11 +19,16 @@ pub(crate) struct BoardLayout {
 pub(super) struct ClusterRegion {
     pub(super) key: String,
     pub(super) name: String,
-    pub(super) bounds: Rect,
     pub(super) label_anchor: Pos2,
     pub(super) note_count: usize,
     pub(super) geometry: ClusterGeometry,
     pub(super) influence_radius: f32,
+}
+
+impl ClusterRegion {
+    pub(super) fn bounds(&self) -> Rect {
+        self.geometry.bounds
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -59,7 +64,7 @@ pub(super) fn layout_bounds(
         .reduce(Rect::union);
     clusters
         .iter()
-        .map(|cluster| cluster.bounds)
+        .map(ClusterRegion::bounds)
         .chain(note_bounds)
         .reduce(Rect::union)
 }

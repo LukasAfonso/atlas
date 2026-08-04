@@ -14,11 +14,25 @@ const MESH_ISO_THRESHOLD: f32 = FIELD_THRESHOLD + 0.000_1;
 pub(super) const MIN_FIELD_STEP: f32 = 20.0;
 pub(super) const FIELD_CELL_BUDGET: f32 = 500_000.0;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ClusterGeometry {
+    pub(super) bounds: Rect,
     pub(super) vertices: Vec<Pos2>,
     pub(super) indices: Vec<u32>,
     pub(super) contours: Vec<Vec<Pos2>>,
+    pub(super) sampled_cells: usize,
+}
+
+impl Default for ClusterGeometry {
+    fn default() -> Self {
+        Self {
+            bounds: Rect::NOTHING,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            contours: Vec::new(),
+            sampled_cells: 0,
+        }
+    }
 }
 
 pub(super) fn field_bounds(positions: &[Pos2], radius: f32) -> Option<Rect> {
@@ -35,17 +49,11 @@ pub(super) fn adaptive_field_step(areas: impl Iterator<Item = f32>) -> f32 {
     (raw / 4.0).ceil() * 4.0
 }
 
-pub(super) fn build_geometry(
-    positions: &[Pos2],
-    radius: f32,
-    step: f32,
-) -> (Rect, ClusterGeometry, usize) {
+pub(super) fn build_geometry(positions: &[Pos2], radius: f32, step: f32) -> ClusterGeometry {
     let Some(source_bounds) = field_bounds(positions, radius) else {
-        return (Rect::NOTHING, ClusterGeometry::default(), 0);
+        return ClusterGeometry::default();
     };
-    let field = ScalarField::sample(positions, radius, step, source_bounds);
-    let geometry = field.march();
-    (field.bounds, geometry, field.cell_count())
+    ScalarField::sample(positions, radius, step, source_bounds).march()
 }
 
 struct ScalarField {
@@ -123,7 +131,11 @@ impl ScalarField {
     }
 
     fn march(&self) -> ClusterGeometry {
-        let mut geometry = ClusterGeometry::default();
+        let mut geometry = ClusterGeometry {
+            bounds: self.bounds,
+            sampled_cells: self.cell_count(),
+            ..ClusterGeometry::default()
+        };
         let mut boundary_edges = BTreeSet::new();
 
         for row in 0..self.rows - 1 {
@@ -141,7 +153,7 @@ impl ScalarField {
                 for [left, right] in [[0, 1], [1, 2], [2, 3], [3, 0]] {
                     push_polygon(
                         &mut geometry,
-                        clip_triangle([corners[left], corners[right], center]),
+                        &clip_triangle([corners[left], corners[right], center]),
                     );
                 }
             }
@@ -201,12 +213,12 @@ fn influence_at(point: Pos2, card: Rect, radius: f32) -> f32 {
     normalized * normalized
 }
 
-fn push_polygon(geometry: &mut ClusterGeometry, polygon: Vec<Pos2>) {
+fn push_polygon(geometry: &mut ClusterGeometry, polygon: &[Pos2]) {
     if polygon.len() < 3 {
         return;
     }
     let first = geometry.vertices.len() as u32;
-    geometry.vertices.extend(polygon.iter().copied());
+    geometry.vertices.extend_from_slice(polygon);
     for offset in 1..polygon.len() - 1 {
         geometry
             .indices
@@ -436,7 +448,7 @@ mod tests {
 
     #[test]
     fn one_source_produces_a_closed_finite_region() {
-        let (_, geometry, _) = build_geometry(&[Pos2::ZERO], BASE_INFLUENCE_RADIUS, MIN_FIELD_STEP);
+        let geometry = build_geometry(&[Pos2::ZERO], BASE_INFLUENCE_RADIUS, MIN_FIELD_STEP);
         assert!(!geometry.vertices.is_empty());
         assert!(!geometry.indices.is_empty());
         assert_eq!(geometry.contours.len(), 1);
@@ -446,8 +458,8 @@ mod tests {
 
     #[test]
     fn translated_source_produces_the_same_closed_topology() {
-        let (_, origin, _) = build_geometry(&[Pos2::ZERO], BASE_INFLUENCE_RADIUS, MIN_FIELD_STEP);
-        let (_, translated, _) = build_geometry(
+        let origin = build_geometry(&[Pos2::ZERO], BASE_INFLUENCE_RADIUS, MIN_FIELD_STEP);
+        let translated = build_geometry(
             &[Pos2::new(-1_880.0, 0.0)],
             BASE_INFLUENCE_RADIUS,
             MIN_FIELD_STEP,
@@ -465,7 +477,7 @@ mod tests {
             Pos2::new(GRID_SPACING.x, GRID_SPACING.y),
         ] {
             assert!(required_pair_radius(Pos2::ZERO, neighbor) <= BASE_INFLUENCE_RADIUS);
-            let (_, geometry, _) = build_geometry(
+            let geometry = build_geometry(
                 &[Pos2::ZERO, neighbor],
                 BASE_INFLUENCE_RADIUS,
                 MIN_FIELD_STEP,

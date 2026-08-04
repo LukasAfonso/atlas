@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use eframe::egui::{self, Pos2, Rect, Sense, Vec2};
 
+mod cluster_gpu;
 mod inspector;
 mod layout;
 mod metaballs;
@@ -15,6 +17,7 @@ mod render;
 use crate::markdown::{CARD_BODY_FONT_WORLD, MarkdownCache};
 use crate::theme;
 use crate::vault::{NoteId, NoteRecord, VaultIndex};
+use cluster_gpu::ClusterMesh;
 use inspector::{RelationshipPanel, paint_relationship_panel};
 pub(crate) use layout::BoardLayout;
 #[cfg(test)]
@@ -22,6 +25,8 @@ use layout::resolved_edges;
 use layout::{BoardEdge, ClusterRegion, LayoutSeed, PlacementFingerprint};
 pub(crate) use placement::prepare_board_layout;
 use render::{NotePaintOptions, note_padding};
+
+pub(crate) use cluster_gpu::initialize as initialize_cluster_renderer;
 
 #[cfg(test)]
 fn clustered_layout(index: &VaultIndex) -> BoardLayout {
@@ -97,14 +102,15 @@ impl Camera {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BoardState {
     pub camera: Camera,
     positions: HashMap<NoteId, Pos2>,
     clusters: Vec<ClusterRegion>,
+    cluster_mesh: Arc<ClusterMesh>,
     edges: Vec<BoardEdge>,
     content_bounds: Option<Rect>,
-    needs_fit: bool,
+    fitted: bool,
     click_origin: Option<Pos2>,
     snapped_note: Option<NoteId>,
     snapped_scroll: f32,
@@ -117,32 +123,26 @@ pub struct BoardState {
     pub visible_notes: usize,
 }
 
-impl Default for BoardState {
-    fn default() -> Self {
-        Self {
-            camera: Camera::default(),
-            positions: HashMap::new(),
-            clusters: Vec::new(),
-            edges: Vec::new(),
-            content_bounds: None,
-            needs_fit: true,
-            click_origin: None,
-            snapped_note: None,
-            snapped_scroll: 0.0,
-            relationship_panel_open: false,
-            markdown_cache: MarkdownCache::default(),
-            layout_root: None,
-            fingerprints: HashMap::new(),
-            layout_duration: Duration::ZERO,
-            last_viewport: None,
-            visible_notes: 0,
-        }
-    }
+#[derive(Clone, Debug)]
+pub enum SelectionRequest {
+    Clear,
+    Select(NoteId),
 }
 
-#[derive(Debug, Default)]
-pub struct BoardOutput {
-    pub selection_request: Option<Option<NoteId>>,
+impl SelectionRequest {
+    fn toggled(hit: Option<NoteId>, selected_note: Option<&NoteId>) -> Self {
+        match hit {
+            Some(hit) if selected_note != Some(&hit) => Self::Select(hit),
+            _ => Self::Clear,
+        }
+    }
+
+    pub fn into_selection(self) -> Option<NoteId> {
+        match self {
+            Self::Clear => None,
+            Self::Select(note_id) => Some(note_id),
+        }
+    }
 }
 
 struct Pointer {
@@ -165,10 +165,8 @@ impl Pointer {
 
 struct FocalNote<'a> {
     note: &'a NoteRecord,
+    position: Pos2,
     rect: Rect,
-    distance: f32,
-    coverage: f32,
-    width_ratio: f32,
 }
 
 struct Focus<'a> {
@@ -200,11 +198,13 @@ impl BoardState {
         layout_duration: Duration,
     ) {
         let visible_world = preserve_view.then(|| self.visible_world_rect()).flatten();
+        let cluster_mesh = Arc::new(ClusterMesh::from_clusters(&layout.clusters));
         let installed = Self {
             camera: self.camera,
             last_viewport: self.last_viewport,
             positions: layout.positions,
             clusters: layout.clusters,
+            cluster_mesh,
             edges: layout.edges,
             content_bounds: layout.content_bounds,
             fingerprints: layout.fingerprints,
@@ -218,10 +218,10 @@ impl BoardState {
         }
 
         if preserve_view {
-            self.needs_fit = match (visible_world, self.content_bounds) {
-                (Some(visible), Some(content)) => !visible.intersects(content),
-                (None, Some(_)) => true,
-                (_, None) => false,
+            self.fitted = match (visible_world, self.content_bounds) {
+                (Some(visible), Some(content)) => visible.intersects(content),
+                (None, Some(_)) => false,
+                (_, None) => true,
             };
         } else {
             self.camera = Camera::default();
@@ -245,7 +245,7 @@ impl BoardState {
         self.snapped_note = None;
         self.snapped_scroll = 0.0;
         self.relationship_panel_open = false;
-        self.needs_fit = true;
+        self.fitted = false;
     }
 
     pub fn select_note(&mut self, note_id: Option<&NoteId>) {
@@ -274,7 +274,7 @@ impl BoardState {
         ui: &mut egui::Ui,
         index: &VaultIndex,
         selected_note: Option<&NoteId>,
-    ) -> BoardOutput {
+    ) -> Option<SelectionRequest> {
         let desired_size = ui.available_size().max(Vec2::splat(1.0));
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
         let cursor = if response.dragged() {
@@ -286,9 +286,9 @@ impl BoardState {
         let viewport = response.rect;
         self.last_viewport = Some(viewport);
 
-        if self.needs_fit {
+        if !self.fitted {
             self.fit_to_viewport(viewport);
-            self.needs_fit = false;
+            self.fitted = true;
         }
 
         let pointer = self.read_pointer(ui, viewport);
@@ -309,28 +309,27 @@ impl BoardState {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
-        let mut output = BoardOutput::default();
-        if let Some(click) = pointer.click {
-            output.selection_request = self.resolve_click(
+        let selection_request = pointer.click.and_then(|click| {
+            self.resolve_click(
                 ui.ctx(),
                 click,
                 panel.as_ref(),
                 snapped_counts.as_ref(),
                 &visible,
                 selected_note,
-            );
-        }
+            )
+        });
 
         if !exited_snap
             && self.snapped_note.is_none()
+            && card_width_ratio(self.camera.scale, viewport) >= SNAP_THRESHOLD
             && let Some(focal) = focus.focal.as_ref()
-            && focal.width_ratio >= SNAP_THRESHOLD
         {
             self.enter_snap(focal.note.id.clone());
             ui.ctx().request_repaint();
         }
 
-        output
+        selection_request
     }
 
     fn read_pointer(&mut self, ui: &egui::Ui, viewport: Rect) -> Pointer {
@@ -459,29 +458,45 @@ impl BoardState {
         }
     }
 
+    fn nearest_visible_note<'a>(
+        &self,
+        index: &'a VaultIndex,
+        viewport: Rect,
+    ) -> Option<FocalNote<'a>> {
+        let level = self.detail_level();
+        index
+            .notes
+            .iter()
+            .filter_map(|note| {
+                let position = self.positions.get(&note.id).copied()?;
+                let rect = self.note_screen_rect(position, viewport, level);
+                viewport.intersects(rect).then_some(FocalNote {
+                    note,
+                    position,
+                    rect,
+                })
+            })
+            .min_by(|left, right| {
+                left.position
+                    .distance_sq(self.camera.center)
+                    .total_cmp(&right.position.distance_sq(self.camera.center))
+            })
+    }
+
     fn focus<'a>(
         &self,
         index: &'a VaultIndex,
         viewport: Rect,
         selected_note: Option<&NoteId>,
     ) -> Focus<'a> {
-        let level = self.detail_level();
         let magnet_progress = snap_magnet_progress(self.camera.scale, viewport);
-        let focal = index
-            .notes
-            .iter()
-            .filter_map(|note| {
-                let position = self.positions.get(&note.id).copied()?;
-                let natural_rect = self.note_screen_rect(position, viewport, level);
-                viewport.intersects(natural_rect).then(|| FocalNote {
-                    note,
-                    rect: magnetized_note_rect(natural_rect, viewport, magnet_progress),
-                    distance: position.distance(self.camera.center),
-                    coverage: note_viewport_coverage(self.camera.scale, viewport),
-                    width_ratio: card_width_ratio(self.camera.scale, viewport),
-                })
-            })
-            .min_by(|left, right| left.distance.total_cmp(&right.distance));
+        let coverage = note_viewport_coverage(self.camera.scale, viewport);
+        let focal = self
+            .nearest_visible_note(index, viewport)
+            .map(|focal| FocalNote {
+                rect: magnetized_note_rect(focal.rect, viewport, magnet_progress),
+                ..focal
+            });
 
         let related = focal.as_ref().map_or_else(HashSet::new, |focal| {
             if selected_note == Some(&focal.note.id) {
@@ -491,12 +506,12 @@ impl BoardState {
             }
         });
         Focus {
-            isolated: focal
-                .as_ref()
-                .is_some_and(|focal| focal.coverage >= ISOLATION_THRESHOLD),
-            unrelated_opacity: focal
-                .as_ref()
-                .map_or(1.0, |focal| unrelated_opacity(focal.coverage)),
+            isolated: focal.is_some() && coverage >= ISOLATION_THRESHOLD,
+            unrelated_opacity: if focal.is_some() {
+                unrelated_opacity(coverage)
+            } else {
+                1.0
+            },
             focal,
             related,
         }
@@ -535,14 +550,7 @@ impl BoardState {
         painter.rect_filled(viewport, 0.0, theme::CANVAS);
         self.paint_grid(painter, viewport);
         self.paint_cluster_regions(painter, viewport);
-        self.paint_edges(
-            painter,
-            viewport,
-            focus.focal.as_ref().map(|focal| &focal.note.id),
-            focus.isolated,
-            &focus.related,
-            focus.unrelated_opacity,
-        );
+        self.paint_edges(painter, viewport, focus);
     }
 
     fn paint_notes(
@@ -616,9 +624,9 @@ impl BoardState {
         snapped_counts: Option<&(Rect, NoteId)>,
         visible: &[VisibleNote<'_>],
         selected_note: Option<&NoteId>,
-    ) -> Option<Option<NoteId>> {
+    ) -> Option<SelectionRequest> {
         if let Some(target) = panel.and_then(|panel| panel.navigation_at(pointer)) {
-            return Some(Some(target));
+            return Some(SelectionRequest::Select(target));
         }
         if panel.is_some_and(|panel| panel.bounds.contains(pointer)) {
             return None;
@@ -626,14 +634,18 @@ impl BoardState {
         if let Some((_, note_id)) = snapped_counts.filter(|(rect, _)| hovers(*rect, pointer)) {
             self.relationship_panel_open = true;
             context.request_repaint();
-            return (selected_note != Some(note_id)).then(|| Some(note_id.clone()));
+            return (selected_note != Some(note_id))
+                .then(|| SelectionRequest::Select(note_id.clone()));
         }
 
         self.relationship_panel_open = false;
         if self.snapped_note.is_some() {
             return None;
         }
-        Some(toggled_selection(hit_test(pointer, visible), selected_note))
+        Some(SelectionRequest::toggled(
+            hit_test(pointer, visible),
+            selected_note,
+        ))
     }
 
     fn enter_snap(&mut self, note_id: NoteId) {
@@ -659,26 +671,12 @@ impl BoardState {
     }
 
     fn zoom_focus(&self, index: &VaultIndex, viewport: Rect) -> Option<Pos2> {
-        if let Some(position) = self
-            .snapped_note
+        self.snapped_note
             .as_ref()
-            .and_then(|snapped| self.positions.get(snapped))
-        {
-            return Some(*position);
-        }
-
-        let level = self.detail_level();
-        index
-            .notes
-            .iter()
-            .filter_map(|note| {
-                let position = self.positions.get(&note.id).copied()?;
-                let rect = self.note_screen_rect(position, viewport, level);
-                viewport.intersects(rect).then_some(position)
-            })
-            .min_by(|left, right| {
-                left.distance(self.camera.center)
-                    .total_cmp(&right.distance(self.camera.center))
+            .and_then(|snapped| self.positions.get(snapped).copied())
+            .or_else(|| {
+                self.nearest_visible_note(index, viewport)
+                    .map(|focal| focal.position)
             })
     }
 
@@ -714,14 +712,6 @@ fn hovers(rect: Rect, pointer: Pos2) -> bool {
 
 fn card_ratio_scale(viewport_width: f32, card_width_ratio: f32) -> f32 {
     viewport_width * card_width_ratio / CARD_SIZE.x
-}
-
-fn toggled_selection(hit: Option<NoteId>, selected_note: Option<&NoteId>) -> Option<NoteId> {
-    if hit.as_ref().is_some_and(|hit| selected_note == Some(hit)) {
-        None
-    } else {
-        hit
-    }
 }
 
 fn related_note_ids(note: &NoteRecord) -> HashSet<NoteId> {
