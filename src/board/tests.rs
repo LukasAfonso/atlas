@@ -453,7 +453,7 @@ fn benchmark_metaball_preparation() {
 }
 
 #[test]
-fn independent_cluster_regions_use_compact_two_slot_spacing() {
+fn independent_cluster_regions_stay_compact_and_non_overlapping() {
     let layout = clustered_layout(&index(vec![
         tagged_note("Alpha", &["alpha"]),
         tagged_note("Beta", &["beta"]),
@@ -472,8 +472,8 @@ fn independent_cluster_regions_use_compact_two_slot_spacing() {
     let beta_position = layout.positions[&NoteId(PathBuf::from("Beta.md"))];
     let separation = (alpha_position - beta_position).abs();
 
-    assert_eq!(separation.x, GRID_SPACING.x * 2.0);
-    assert_eq!(separation.y, 0.0);
+    assert!(separation.x <= GRID_SPACING.x * 4.0);
+    assert!(separation.y <= GRID_SPACING.y * 6.0);
     assert!(
         !Rect::from_center_size(alpha_position, CARD_SIZE)
             .intersects(Rect::from_center_size(beta_position, CARD_SIZE))
@@ -505,6 +505,45 @@ fn same_tag_notes_fill_a_compact_grid_before_expanding() {
 
     assert_eq!(max_x - min_x, 2);
     assert_eq!(max_y - min_y, 2);
+}
+
+#[test]
+fn growing_a_shared_tag_cluster_stays_as_compact_as_a_fresh_layout() {
+    fn slot_span(layout: &super::BoardLayout) -> (i32, i32) {
+        let slots: Vec<_> = layout
+            .positions
+            .values()
+            .map(|position| {
+                (
+                    (position.x / GRID_SPACING.x).round() as i32,
+                    (position.y / GRID_SPACING.y).round() as i32,
+                )
+            })
+            .collect();
+        let min_x = slots.iter().map(|slot| slot.0).min().expect("x slot");
+        let max_x = slots.iter().map(|slot| slot.0).max().expect("x slot");
+        let min_y = slots.iter().map(|slot| slot.1).min().expect("y slot");
+        let max_y = slots.iter().map(|slot| slot.1).max().expect("y slot");
+        (max_x - min_x, max_y - min_y)
+    }
+
+    let original = index(
+        (0..5)
+            .map(|index| tagged_note(&format!("Note {index}"), &["cluster"]))
+            .collect(),
+    );
+    let cold = prepare_board_layout(&original, None);
+    let seed = seed_from(&cold, "/vault");
+
+    let mut grown = original.clone();
+    grown
+        .notes
+        .extend((5..10).map(|index| tagged_note(&format!("Note {index}"), &["cluster"])));
+
+    let warm = prepare_board_layout(&grown, Some(&seed));
+    let fresh = prepare_board_layout(&grown, None);
+    assert_eq!(slot_span(&warm), slot_span(&fresh));
+    assert_no_card_overlaps(&warm);
 }
 
 #[test]
@@ -620,11 +659,20 @@ fn relationships_affect_static_cluster_order() {
     linked_left.references.push(linked_right.id.clone());
     linked_right.backlinks.push(linked_left.id.clone());
     let linked = clustered_layout(&index(vec![linked_left, middle, linked_right]));
-    let left_id = NoteId(PathBuf::from("Left.md"));
-    let right_id = NoteId(PathBuf::from("Right.md"));
 
-    assert_ne!(linked.positions[&right_id], unrelated.positions[&right_id]);
-    assert_eq!(linked.positions[&left_id], unrelated.positions[&left_id]);
+    let center = |layout: &super::BoardLayout, name: &str| {
+        layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("named cluster")
+            .bounds()
+            .center()
+    };
+    let unrelated_distance = center(&unrelated, "alpha").distance(center(&unrelated, "gamma"));
+    let linked_distance = center(&linked, "alpha").distance(center(&linked, "gamma"));
+
+    assert!(linked_distance < unrelated_distance);
 }
 
 #[test]

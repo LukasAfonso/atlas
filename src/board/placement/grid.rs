@@ -37,15 +37,45 @@ pub(super) fn nearest_free_coarse_slot(
     desired: (i32, i32),
     occupied: &HashSet<(i32, i32)>,
 ) -> (i32, i32) {
+    nearest_free_coarse_block(desired, occupied, 0)
+}
+
+pub(super) fn nearest_free_coarse_block(
+    desired: (i32, i32),
+    occupied: &HashSet<(i32, i32)>,
+    footprint_radius: i32,
+) -> (i32, i32) {
     for radius in 0_i32.. {
         if let Some(slot) = ring_by_distance(desired, radius)
             .into_iter()
-            .find(|slot| !occupied.contains(slot))
+            .find(|slot| block_is_free(*slot, footprint_radius, occupied))
         {
             return slot;
         }
     }
-    unreachable!("an infinite grid always contains a free slot")
+    unreachable!("an infinite grid always contains a free block")
+}
+
+fn block_is_free(center: (i32, i32), radius: i32, occupied: &HashSet<(i32, i32)>) -> bool {
+    (-radius..=radius)
+        .all(|dy| (-radius..=radius).all(|dx| !occupied.contains(&(center.0 + dx, center.1 + dy))))
+}
+
+pub(super) fn reserve_coarse_block(
+    occupied: &mut HashSet<(i32, i32)>,
+    center: (i32, i32),
+    radius: i32,
+) {
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            occupied.insert((center.0 + dx, center.1 + dy));
+        }
+    }
+}
+
+pub(super) fn compact_side_length(member_count: usize) -> i32 {
+    let side = (member_count as f32).sqrt().ceil().max(1.0) as i32;
+    if side % 2 == 0 { side + 1 } else { side }
 }
 
 pub(super) fn ring_by_distance(origin: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
@@ -74,36 +104,10 @@ fn square_ring(origin: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
     slots
 }
 
-pub(super) fn compact_offset(index: usize) -> (i32, i32) {
-    if index == 0 {
-        return (0, 0);
-    }
-    let mut remaining = index;
-    for radius in 1_i32.. {
-        let ring = ring_by_distance((0, 0), radius);
-        if remaining <= ring.len() {
-            return ring[remaining - 1];
-        }
-        remaining -= ring.len();
-    }
-    unreachable!("an infinite grid always contains an unused offset")
-}
-
-pub(super) fn compact_side_length(member_count: usize) -> i32 {
-    let side = (member_count as f32).sqrt().ceil().max(1.0) as i32;
-    if side % 2 == 0 { side + 1 } else { side }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{compact_offset, compact_side_length};
+    use super::{compact_side_length, nearest_free_coarse_block, reserve_coarse_block};
     use std::collections::HashSet;
-
-    #[test]
-    fn compact_offsets_do_not_repeat() {
-        let offsets: HashSet<_> = (0..1_000).map(compact_offset).collect();
-        assert_eq!(offsets.len(), 1_000);
-    }
 
     #[test]
     fn shelf_footprints_match_center_out_note_packing() {
@@ -113,4 +117,19 @@ mod tests {
         assert_eq!(compact_side_length(64), 9);
         assert_eq!(compact_side_length(100), 11);
     }
+
+    #[test]
+    fn nearest_free_block_skips_a_reserved_footprint() {
+        let mut occupied = HashSet::new();
+        reserve_coarse_block(&mut occupied, (0, 0), 2);
+
+        let slot = nearest_free_coarse_block((0, 0), &occupied, 1);
+        assert!(!occupied.contains(&slot));
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                assert!(!occupied.contains(&(slot.0 + dx, slot.1 + dy)));
+            }
+        }
+    }
 }
+

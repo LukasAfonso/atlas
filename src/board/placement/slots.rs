@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use eframe::egui::{Pos2, Vec2};
 
-use super::grid::{compact_offset, position_slot};
+use super::grid::{nearest_free_coarse_slot, position_slot};
 use super::{NoteTags, Seeding, note_sort_key};
 use crate::vault::{NoteId, NoteRecord};
 
@@ -69,6 +69,9 @@ pub(super) fn spread_shared_anchors(
             .into_iter()
             .filter(|note| !seeding.is_unchanged(&note.id))
             .collect();
+        if movable.is_empty() {
+            continue;
+        }
         movable.sort_by(|left, right| {
             let left_degree = left.references.len() + left.backlinks.len();
             let right_degree = right.references.len() + right.backlinks.len();
@@ -78,12 +81,24 @@ pub(super) fn spread_shared_anchors(
                 .then_with(|| right_degree.cmp(&left_degree))
                 .then_with(|| note_sort_key(left).cmp(&note_sort_key(right)))
         });
-        let reserve_center = desired
+        let group_tags: BTreeSet<&str> = movable
             .iter()
-            .any(|(id, slot)| seeding.is_unchanged(id) && *slot == anchor);
-        for (index, note) in movable.into_iter().enumerate() {
-            let offset = compact_offset(index + usize::from(reserve_center));
-            desired.insert(note.id.clone(), (anchor.0 + offset.0, anchor.1 + offset.1));
+            .flat_map(|note| note_tags[&note.id].iter().map(|(key, _)| key.as_str()))
+            .collect();
+        let mut occupied: HashSet<(i32, i32)> = notes
+            .iter()
+            .filter(|note| {
+                seeding.is_unchanged(&note.id)
+                    && note_tags[&note.id]
+                        .iter()
+                        .any(|(key, _)| group_tags.contains(key.as_str()))
+            })
+            .map(|note| desired[&note.id])
+            .collect();
+        for note in movable {
+            let slot = nearest_free_coarse_slot(anchor, &occupied);
+            occupied.insert(slot);
+            desired.insert(note.id.clone(), slot);
         }
     }
     desired

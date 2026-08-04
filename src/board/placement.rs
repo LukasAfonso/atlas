@@ -128,10 +128,6 @@ impl<'a> Seeding<'a> {
         }
     }
 
-    fn is_warm(&self) -> bool {
-        self.seed.is_some()
-    }
-
     fn exact_rescan(&self) -> Option<&LayoutSeed> {
         self.seed.filter(|_| self.is_exact_rescan)
     }

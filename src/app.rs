@@ -32,6 +32,7 @@ enum UiAction {
     CancelScan,
     BackToVaults,
     Rescan(PathBuf),
+    DebugRelayout(PathBuf),
     SetSelection(Option<NoteId>),
 }
 
@@ -79,6 +80,10 @@ impl AtlasApp {
             UiAction::Rescan(path) => {
                 self.notice = None;
                 self.start_scan(path, context, true);
+            }
+            UiAction::DebugRelayout(path) => {
+                self.notice = None;
+                self.start_scan(path, context, false);
             }
             UiAction::ForgetVault(path) => {
                 self.persisted.forget(&path);
@@ -200,6 +205,9 @@ fn render_vault(
                 }
                 if ui.add(quiet_button("Rescan")).clicked() {
                     actions.push(UiAction::Rescan(index.root.clone()));
+                }
+                if ui.add(quiet_button("Redo layout (debug)")).clicked() {
+                    actions.push(UiAction::DebugRelayout(index.root.clone()));
                 }
                 if ui.add(quiet_button("Fit board")).clicked() {
                     board.request_fit();
