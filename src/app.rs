@@ -7,9 +7,11 @@ use std::{
 use eframe::egui::{self, Color32, RichText, Stroke};
 mod jobs;
 mod registry;
+mod search;
 
 use jobs::{FolderPickerJob, ScanJob};
 use registry::PersistedState;
+use search::SearchState;
 
 use crate::board::{BoardState, initialize_cluster_renderer};
 use crate::theme;
@@ -32,8 +34,8 @@ enum UiAction {
     CancelScan,
     BackToVaults,
     Rescan(PathBuf),
-    DebugRelayout(PathBuf),
     SetSelection(Option<NoteId>),
+    FocusNote(NoteId),
 }
 
 pub struct AtlasApp {
@@ -45,6 +47,7 @@ pub struct AtlasApp {
     board: BoardState,
     selected_note: Option<NoteId>,
     notice: Option<(DiagnosticSeverity, String)>,
+    search: SearchState,
 }
 
 impl AtlasApp {
@@ -67,6 +70,7 @@ impl AtlasApp {
             board: BoardState::default(),
             selected_note: None,
             notice: None,
+            search: SearchState::default(),
         }
     }
 
@@ -80,10 +84,6 @@ impl AtlasApp {
             UiAction::Rescan(path) => {
                 self.notice = None;
                 self.start_scan(path, context, true);
-            }
-            UiAction::DebugRelayout(path) => {
-                self.notice = None;
-                self.start_scan(path, context, false);
             }
             UiAction::ForgetVault(path) => {
                 self.persisted.forget(&path);
@@ -100,6 +100,11 @@ impl AtlasApp {
             UiAction::SetSelection(note_id) => {
                 self.board.select_note(note_id.as_ref());
                 self.selected_note = note_id;
+                context.request_repaint();
+            }
+            UiAction::FocusNote(note_id) => {
+                self.board.focus_on_note(&note_id);
+                self.selected_note = Some(note_id);
                 context.request_repaint();
             }
         }
@@ -176,6 +181,7 @@ fn render_vault(
     index: &VaultIndex,
     board: &mut BoardState,
     selected_note: Option<&NoteId>,
+    search: &mut SearchState,
 ) -> Vec<UiAction> {
     let mut actions = Vec::new();
 
@@ -199,31 +205,60 @@ fn render_vault(
                         .color(theme::MUTED),
                 );
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(quiet_button("← Vaults")).clicked() {
-                    actions.push(UiAction::BackToVaults);
-                }
-                if ui.add(quiet_button("Rescan")).clicked() {
-                    actions.push(UiAction::Rescan(index.root.clone()));
-                }
-                if ui.add(quiet_button("Redo layout (debug)")).clicked() {
-                    actions.push(UiAction::DebugRelayout(index.root.clone()));
-                }
-                if ui.add(quiet_button("Fit board")).clicked() {
-                    board.request_fit();
-                }
-            });
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match nav_group(ui, &["⌕ Search", "Fit board", "Rescan", "← Vaults"]) {
+                    Some(0) => search.open(),
+                    Some(1) => board.request_fit(),
+                    Some(2) => actions.push(UiAction::Rescan(index.root.clone())),
+                    Some(3) => actions.push(UiAction::BackToVaults),
+                    _ => {}
+                },
+            );
         });
     });
     ui.add_space(8.0);
 
     if index.notes.is_empty() {
         render_empty_vault(ui);
-    } else if let Some(request) = board.show(ui, index, selected_note) {
+    } else if let Some(request) = board.show(ui, index, selected_note, !search.is_open()) {
         actions.push(UiAction::SetSelection(request.into_selection()));
     }
 
+    if let Some(note_id) = search::render(ui.ctx(), search, index) {
+        actions.push(UiAction::FocusNote(note_id));
+    }
+
     actions
+}
+
+fn nav_group(ui: &mut egui::Ui, labels: &[&str]) -> Option<usize> {
+    let mut clicked = None;
+    egui::Frame::new()
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0, theme::LINE))
+        .corner_radius(11)
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (index, label) in labels.iter().enumerate() {
+                    if index > 0 {
+                        ui.add_space(2.0);
+                        ui.separator();
+                        ui.add_space(2.0);
+                    }
+                    let button = egui::Button::new(*label)
+                        .frame(false)
+                        .corner_radius(9)
+                        .min_size(egui::vec2(0.0, 30.0));
+                    if ui.add(button).clicked() {
+                        clicked = Some(index);
+                    }
+                }
+            });
+        });
+    clicked
 }
 
 fn render_empty_vault(ui: &mut egui::Ui) {
@@ -259,9 +294,13 @@ impl eframe::App for AtlasApp {
                     AppScreen::Scanning { root, generation } => {
                         render_scanning(ui, root, *generation)
                     }
-                    AppScreen::Vault { index } => {
-                        render_vault(ui, index, &mut self.board, self.selected_note.as_ref())
-                    }
+                    AppScreen::Vault { index } => render_vault(
+                        ui,
+                        index,
+                        &mut self.board,
+                        self.selected_note.as_ref(),
+                        &mut self.search,
+                    ),
                 }
             })
             .inner;

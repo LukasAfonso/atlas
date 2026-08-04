@@ -114,7 +114,11 @@ pub(super) fn tag_centers(
             median(preserved.iter().map(|position| position.x).collect()),
             median(preserved.iter().map(|position| position.y).collect()),
         );
-        reserve_coarse_block(&mut occupied, coarse_slot(center, stride), footprint_radius(tag));
+        reserve_coarse_block(
+            &mut occupied,
+            coarse_slot(center, stride),
+            footprint_radius(tag),
+        );
         centers.insert(tag.clone(), center);
     }
 

@@ -978,7 +978,7 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
         ..eframe::egui::RawInput::default()
     };
     let _ = context.run_ui(input, |ui| {
-        board.show(ui, &index, Some(&selected_id));
+        board.show(ui, &index, Some(&selected_id), true);
     });
     assert_eq!(board.snapped_note.as_ref(), Some(&selected_id));
     assert_eq!(board.camera.center, pre_snap_camera.center);
@@ -988,7 +988,7 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
     assert_eq!(board.snapped_note.as_ref(), Some(&selected_id));
 
     let _ = context.run_ui(eframe::egui::RawInput::default(), |ui| {
-        board.show(ui, &index, Some(&selected_id));
+        board.show(ui, &index, Some(&selected_id), true);
     });
 
     let snapped_scale = board.camera.scale;
@@ -998,7 +998,7 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
         ..RawInput::default()
     };
     let _ = context.run_ui(zoom_out, |ui| {
-        board.show(ui, &index, Some(&selected_id));
+        board.show(ui, &index, Some(&selected_id), true);
     });
     assert!(board.snapped_note.is_none());
     assert!(board.camera.scale < snapped_scale);
@@ -1023,10 +1023,10 @@ fn clicking_a_note_emits_a_selection_request() {
     let pointer = screen.center();
     let mut selection = None;
     let _ = context.run_ui(pointer_input(screen, pointer, true), |ui| {
-        board.show(ui, &index, None);
+        board.show(ui, &index, None, true);
     });
     let _ = context.run_ui(pointer_input(screen, pointer, false), |ui| {
-        selection = board.show(ui, &index, None);
+        selection = board.show(ui, &index, None, true);
     });
 
     assert!(matches!(selection, Some(SelectionRequest::Select(ref id)) if *id == selected_id));
@@ -1076,10 +1076,10 @@ fn clicking_a_reference_in_the_side_panel_navigates_to_it() {
     let pointer = Pos2::new(970.0, 50.0);
     let mut selection = None;
     let _ = context.run_ui(pointer_input(screen, pointer, true), |ui| {
-        board.show(ui, &index, Some(&source_id));
+        board.show(ui, &index, Some(&source_id), true);
     });
     let _ = context.run_ui(pointer_input(screen, pointer, false), |ui| {
-        selection = board.show(ui, &index, Some(&source_id));
+        selection = board.show(ui, &index, Some(&source_id), true);
     });
 
     assert!(matches!(selection, Some(SelectionRequest::Select(id)) if id == target_id));
@@ -1109,20 +1109,20 @@ fn snapped_relationship_counts_are_the_only_panel_trigger() {
     let note_body = screen.center();
     let mut body_selection = None;
     let _ = context.run_ui(pointer_input(screen, note_body, true), |ui| {
-        board.show(ui, &index, None);
+        board.show(ui, &index, None, true);
     });
     let _ = context.run_ui(pointer_input(screen, note_body, false), |ui| {
-        body_selection = board.show(ui, &index, None);
+        body_selection = board.show(ui, &index, None, true);
     });
     assert!(body_selection.is_none());
     assert!(!board.relationship_panel_open);
 
     let relationship_counts = Pos2::new(900.0, 660.0);
     let _ = context.run_ui(pointer_input(screen, relationship_counts, true), |ui| {
-        board.show(ui, &index, Some(&selected_id));
+        board.show(ui, &index, Some(&selected_id), true);
     });
     let _ = context.run_ui(pointer_input(screen, relationship_counts, false), |ui| {
-        board.show(ui, &index, Some(&selected_id));
+        board.show(ui, &index, Some(&selected_id), true);
     });
     assert!(board.relationship_panel_open);
 }
@@ -1154,7 +1154,7 @@ fn magnetic_zoom_centers_and_snaps_a_note_without_selection() {
         ..RawInput::default()
     };
     let _ = context.run_ui(input, |ui| {
-        board.show(ui, &index, None);
+        board.show(ui, &index, None, true);
     });
 
     assert_eq!(board.snapped_note.as_ref(), Some(&selected_id));

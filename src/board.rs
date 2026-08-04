@@ -248,6 +248,25 @@ impl BoardState {
         self.fitted = false;
     }
 
+    pub fn focus_on_note(&mut self, note_id: &NoteId) {
+        let Some(position) = self.positions.get(note_id).copied() else {
+            return;
+        };
+        self.camera.center = position;
+        if let Some(viewport) = self.last_viewport {
+            let arrival_scale = card_ratio_scale(viewport.width(), SNAP_MAGNET_THRESHOLD);
+            self.camera.scale = self
+                .camera
+                .scale
+                .max(arrival_scale)
+                .clamp(MIN_SCALE, MAX_SCALE);
+        }
+        self.snapped_note = None;
+        self.snapped_scroll = 0.0;
+        self.relationship_panel_open = true;
+        self.fitted = true;
+    }
+
     pub fn select_note(&mut self, note_id: Option<&NoteId>) {
         let Some(note_id) = note_id else {
             self.relationship_panel_open = false;
@@ -274,6 +293,7 @@ impl BoardState {
         ui: &mut egui::Ui,
         index: &VaultIndex,
         selected_note: Option<&NoteId>,
+        interactive: bool,
     ) -> Option<SelectionRequest> {
         let desired_size = ui.available_size().max(Vec2::splat(1.0));
         let (response, painter) = ui.allocate_painter(desired_size, Sense::click_and_drag());
@@ -292,7 +312,7 @@ impl BoardState {
         }
 
         let pointer = self.read_pointer(ui, viewport);
-        let exited_snap = self.navigate(ui, &response, &pointer, index, viewport);
+        let exited_snap = interactive && self.navigate(ui, &response, &pointer, index, viewport);
 
         let focus = self.focus(index, viewport, selected_note);
         let visible = self.collect_visible(index, viewport, &focus);
@@ -302,25 +322,30 @@ impl BoardState {
         let snapped_counts = self.paint_notes(&painter, viewport, &visible, &focus, selected_note);
         let panel = self.paint_relationship_panel(&painter, viewport, index, selected_note);
 
-        if snapped_counts
-            .as_ref()
-            .is_some_and(|(rect, _)| pointer.hovers(*rect))
+        if interactive
+            && snapped_counts
+                .as_ref()
+                .is_some_and(|(rect, _)| pointer.hovers(*rect))
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
 
-        let selection_request = pointer.click.and_then(|click| {
-            self.resolve_click(
-                ui.ctx(),
-                click,
-                panel.as_ref(),
-                snapped_counts.as_ref(),
-                &visible,
-                selected_note,
-            )
-        });
+        let selection_request = interactive
+            .then_some(pointer.click)
+            .flatten()
+            .and_then(|click| {
+                self.resolve_click(
+                    ui.ctx(),
+                    click,
+                    panel.as_ref(),
+                    snapped_counts.as_ref(),
+                    &visible,
+                    selected_note,
+                )
+            });
 
-        if !exited_snap
+        if interactive
+            && !exited_snap
             && self.snapped_note.is_none()
             && card_width_ratio(self.camera.scale, viewport) >= SNAP_THRESHOLD
             && let Some(focal) = focus.focal.as_ref()
