@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    path::Path,
 };
 
 use eframe::egui::{Pos2, Vec2};
@@ -27,22 +28,22 @@ const NEW_WEIGHT: f64 = 1.0;
 const MAX_CONNECTIVITY_PASSES: usize = 32;
 const MAX_STALLED_PASSES: usize = 4;
 const CLUSTER_GUTTER_SLOTS: i32 = 1;
+const SEPARATION_PASSES: usize = 4;
+const MAX_SEPARATION_RADIUS: i32 = 32;
+const FIELD_PASSES: usize = 8;
+
+type NoteTags = HashMap<NoteId, Vec<(String, String)>>;
+type ClusterMembers = BTreeMap<String, Vec<NoteId>>;
+type TagWeights = BTreeMap<(String, String), u32>;
 
 pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>) -> BoardLayout {
     if index.notes.is_empty() {
-        return BoardLayout {
-            positions: HashMap::new(),
-            clusters: Vec::new(),
-            edges: Vec::new(),
-            stats: LayoutStats::default(),
-            fingerprints: HashMap::new(),
-            content_bounds: None,
-        };
+        return BoardLayout::default();
     }
 
     let mut notes: Vec<_> = index.notes.iter().collect();
     notes.sort_by_key(|note| note_sort_key(note));
-    let note_tags: HashMap<_, _> = notes
+    let note_tags: NoteTags = notes
         .iter()
         .map(|note| (note.id.clone(), normalized_tags(note)))
         .collect();
@@ -55,192 +56,275 @@ pub(crate) fn prepare_board_layout(index: &VaultIndex, seed: Option<&LayoutSeed>
             )
         })
         .collect();
-    let usable_seed = seed.filter(|seed| seed.root == index.root);
-    let unchanged: HashSet<_> = usable_seed.map_or_else(HashSet::new, |seed| {
-        seed.fingerprints
-            .iter()
-            .filter(|(note_id, fingerprint)| {
-                fingerprints.get(*note_id) == Some(*fingerprint)
-                    && seed.positions.contains_key(*note_id)
-            })
-            .map(|(note_id, _)| note_id.clone())
-            .collect()
-    });
-    let exact_rescan = usable_seed
-        .is_some_and(|seed| seed.positions.len() == notes.len() && unchanged.len() == notes.len());
+    let seeding = Seeding::new(seed, &index.root, &fingerprints, notes.len());
 
-    let cluster_names = cluster_names(&notes, &note_tags);
-    let cluster_members = cluster_members(&notes, &note_tags);
-    let tag_weights = tag_relationship_weights(&notes, &note_tags);
-    let tag_centers = tag_centers(&cluster_members, &tag_weights, usable_seed, &unchanged);
-    let desired = desired_note_slots(&notes, &note_tags, &tag_centers, usable_seed, &unchanged);
-    let weights: HashMap<_, _> = notes
-        .iter()
-        .map(|note| {
-            (
-                note.id.clone(),
-                if unchanged.contains(&note.id) {
-                    PRESERVED_WEIGHT
-                } else {
-                    NEW_WEIGHT
-                },
-            )
-        })
-        .collect();
+    let members = cluster_members(&notes, &note_tags);
+    let (mut positions, connectivity_passes) =
+        solve_positions(&notes, &note_tags, &members, &seeding);
+    let fields = resolve_cluster_fields(&notes, &note_tags, &members, &mut positions);
+    let (clusters, sampled_field_cells) =
+        build_cluster_regions(&notes, &note_tags, &members, &positions, &fields);
 
-    let mut positions = if exact_rescan {
-        usable_seed
-            .expect("an exact rescan has a seed")
-            .positions
-            .clone()
-    } else {
-        let spread = spread_shared_anchors(&notes, &note_tags, desired.clone(), &unchanged);
-        slots_to_positions(pack_rows(&notes, &spread, &weights))
-    };
-    let desired_positions = slots_to_positions(desired.clone());
-    let (refined, connectivity_passes) = if exact_rescan {
-        (positions, 0)
-    } else {
-        refine_connectivity(
-            &notes,
-            &note_tags,
-            positions,
-            &desired_positions,
-            usable_seed,
-            &unchanged,
-            &weights,
-        )
-    };
-    positions = refined;
+    BoardLayout {
+        edges: resolved_edges(index, &positions),
+        content_bounds: layout_bounds(&positions, &clusters),
+        stats: LayoutStats {
+            connectivity_passes,
+            fallback_cluster_count: fields.fallback_tags.len(),
+            maximum_influence_radius: fields.radii.values().copied().fold(0.0, f32::max),
+            sampled_field_cells,
+            field_step: fields.step,
+        },
+        positions,
+        clusters,
+        fingerprints,
+    }
+}
 
-    let (mut raw_radii, mut fallback_tags) = cluster_radii(&cluster_members, &positions);
-    for _ in 0..4 {
-        if separate_foreign_notes(
-            &notes,
-            &note_tags,
-            &cluster_members,
+struct Seeding<'a> {
+    seed: Option<&'a LayoutSeed>,
+    unchanged: HashSet<NoteId>,
+    exact_rescan: bool,
+}
+
+impl<'a> Seeding<'a> {
+    fn new(
+        seed: Option<&'a LayoutSeed>,
+        root: &Path,
+        fingerprints: &HashMap<NoteId, PlacementFingerprint>,
+        note_count: usize,
+    ) -> Self {
+        let seed = seed.filter(|seed| seed.root == root);
+        let unchanged: HashSet<_> = seed.map_or_else(HashSet::new, |seed| {
+            seed.fingerprints
+                .iter()
+                .filter(|(note_id, fingerprint)| {
+                    fingerprints.get(*note_id) == Some(*fingerprint)
+                        && seed.positions.contains_key(*note_id)
+                })
+                .map(|(note_id, _)| note_id.clone())
+                .collect()
+        });
+        let exact_rescan = seed.is_some_and(|seed| {
+            seed.positions.len() == note_count && unchanged.len() == note_count
+        });
+        Self {
+            seed,
+            unchanged,
+            exact_rescan,
+        }
+    }
+
+    fn is_warm(&self) -> bool {
+        self.seed.is_some()
+    }
+
+    fn is_unchanged(&self, note_id: &NoteId) -> bool {
+        self.unchanged.contains(note_id)
+    }
+
+    fn preserved_position(&self, note_id: &NoteId) -> Option<Pos2> {
+        self.is_unchanged(note_id)
+            .then(|| self.seed?.positions.get(note_id).copied())
+            .flatten()
+    }
+
+    fn weight(&self, note_id: &NoteId) -> f64 {
+        if self.is_unchanged(note_id) {
+            PRESERVED_WEIGHT
+        } else {
+            NEW_WEIGHT
+        }
+    }
+}
+
+fn solve_positions(
+    notes: &[&NoteRecord],
+    note_tags: &NoteTags,
+    members: &ClusterMembers,
+    seeding: &Seeding<'_>,
+) -> (HashMap<NoteId, Pos2>, usize) {
+    let tag_weights = tag_relationship_weights(notes, note_tags);
+    let tag_centers = tag_centers(members, &tag_weights, seeding);
+    let desired = desired_note_slots(notes, note_tags, &tag_centers, seeding);
+
+    if seeding.exact_rescan {
+        let seed = seeding.seed.expect("an exact rescan has a seed");
+        return (seed.positions.clone(), 0);
+    }
+
+    let spread = spread_shared_anchors(notes, note_tags, desired.clone(), seeding);
+    let initial = slots_to_positions(pack_rows(notes, &spread, seeding));
+    refine_connectivity(
+        notes,
+        members,
+        initial,
+        &slots_to_positions(desired),
+        seeding,
+    )
+}
+
+struct ClusterFields {
+    radii: BTreeMap<String, f32>,
+    fallback_tags: BTreeSet<String>,
+    step: f32,
+}
+
+fn resolve_cluster_fields(
+    notes: &[&NoteRecord],
+    note_tags: &NoteTags,
+    members: &ClusterMembers,
+    positions: &mut HashMap<NoteId, Pos2>,
+) -> ClusterFields {
+    let (mut raw_radii, mut fallback_tags) = cluster_radii(members, positions);
+    for _ in 0..SEPARATION_PASSES {
+        let moved = separate_foreign_notes(
+            notes,
+            note_tags,
+            members,
             &raw_radii,
             &fallback_tags,
-            &mut positions,
-        ) == 0
-        {
+            positions,
+        );
+        if moved == 0 {
             break;
         }
-        (raw_radii, fallback_tags) = cluster_radii(&cluster_members, &positions);
+        (raw_radii, fallback_tags) = cluster_radii(members, positions);
     }
 
-    let mut sample_step = sample_step_for(&cluster_members, &positions, &raw_radii);
-    let mut radii = raw_radii.clone();
-    for _ in 0..8 {
-        for (tag, raw_radius) in &raw_radii {
-            radii.insert(
-                tag.clone(),
-                if *raw_radius > BASE_INFLUENCE_RADIUS {
-                    raw_radius + sample_step
-                } else {
-                    *raw_radius
-                },
-            );
+    let mut fields = ClusterFields {
+        step: sample_step_for(members, positions, &raw_radii),
+        radii: raw_radii.clone(),
+        fallback_tags,
+    };
+    pad_radii_to_sample_step(&raw_radii, members, positions, &mut fields);
+    grow_radii_until_connected(members, positions, &mut fields);
+    fields
+}
+
+fn pad_radii_to_sample_step(
+    raw_radii: &BTreeMap<String, f32>,
+    members: &ClusterMembers,
+    positions: &HashMap<NoteId, Pos2>,
+    fields: &mut ClusterFields,
+) {
+    for _ in 0..FIELD_PASSES {
+        for (tag, raw_radius) in raw_radii {
+            let padded = if *raw_radius > BASE_INFLUENCE_RADIUS {
+                raw_radius + fields.step
+            } else {
+                *raw_radius
+            };
+            fields.radii.insert(tag.clone(), padded);
         }
-        let next_step = sample_step_for(&cluster_members, &positions, &radii);
-        if next_step == sample_step {
+        let next_step = sample_step_for(members, positions, &fields.radii);
+        if next_step == fields.step {
             break;
         }
-        sample_step = next_step;
+        fields.step = next_step;
     }
+}
 
-    for _ in 0..8 {
+fn grow_radii_until_connected(
+    members: &ClusterMembers,
+    positions: &HashMap<NoteId, Pos2>,
+    fields: &mut ClusterFields,
+) {
+    for _ in 0..FIELD_PASSES {
         let mut radius_changed = false;
-        for (key, members) in &cluster_members {
-            if fallback_tags.contains(key) {
+        for (tag, tag_members) in members {
+            if fields.fallback_tags.contains(tag) {
                 continue;
             }
-            let member_positions: Vec<_> =
-                members.iter().map(|note_id| positions[note_id]).collect();
-            let initial_radius = radii[key];
+            let member_positions = member_positions(tag_members, positions);
+            let initial_radius = fields.radii[tag];
             let mut radius = initial_radius;
-            let (_, mut geometry, _) = build_geometry(&member_positions, radius, sample_step);
-            for _ in 0..8 {
+            let (_, mut geometry, _) = build_geometry(&member_positions, radius, fields.step);
+            for _ in 0..FIELD_PASSES {
                 if geometry.contours.len() == 1 {
                     break;
                 }
-                radius += sample_step;
-                (_, geometry, _) = build_geometry(&member_positions, radius, sample_step);
+                radius += fields.step;
+                (_, geometry, _) = build_geometry(&member_positions, radius, fields.step);
             }
             if radius > initial_radius {
-                fallback_tags.insert(key.clone());
-                radii.insert(key.clone(), radius);
+                fields.fallback_tags.insert(tag.clone());
+                fields.radii.insert(tag.clone(), radius);
                 radius_changed = true;
             }
         }
-        let next_step = sample_step_for(&cluster_members, &positions, &radii);
-        if !radius_changed && next_step == sample_step {
+        let next_step = sample_step_for(members, positions, &fields.radii);
+        if !radius_changed && next_step == fields.step {
             break;
         }
-        sample_step = next_step;
+        fields.step = next_step;
     }
+}
 
+fn build_cluster_regions(
+    notes: &[&NoteRecord],
+    note_tags: &NoteTags,
+    members: &ClusterMembers,
+    positions: &HashMap<NoteId, Pos2>,
+    fields: &ClusterFields,
+) -> (Vec<ClusterRegion>, usize) {
+    let names = cluster_names(notes, note_tags);
     let mut sampled_cells = 0;
-    let mut clusters = Vec::with_capacity(cluster_members.len());
-    for (key, members) in cluster_members {
-        let member_positions: Vec<_> = members.iter().map(|note_id| positions[note_id]).collect();
-        let radius = radii[&key];
-        let (bounds, geometry, cell_count) = build_geometry(&member_positions, radius, sample_step);
+    let mut clusters = Vec::with_capacity(members.len());
+
+    for (tag, tag_members) in members {
+        let radius = fields.radii[tag];
+        let (bounds, geometry, cell_count) = build_geometry(
+            &member_positions(tag_members, positions),
+            radius,
+            fields.step,
+        );
         debug_assert_eq!(
             geometry.contours.len(),
             1,
-            "cluster {key} did not produce one connected field"
+            "cluster {tag} did not produce one connected field"
         );
         sampled_cells += cell_count;
-        let label_member = members
-            .iter()
-            .min_by(|left, right| {
-                positions[*left]
-                    .y
-                    .total_cmp(&positions[*right].y)
-                    .then_with(|| positions[*left].x.total_cmp(&positions[*right].x))
-                    .then_with(|| left.cmp(right))
-            })
-            .expect("clusters always have members");
-        let label_anchor = positions[label_member]
-            + Vec2::new(
-                -CARD_SIZE.x * 0.5 + 12.0,
-                -CARD_SIZE.y * 0.5 - radius * 0.35,
-            );
         clusters.push(ClusterRegion {
-            key: key.clone(),
-            name: cluster_names[&key].clone(),
+            key: tag.clone(),
+            name: names[tag].clone(),
             bounds,
-            label_anchor,
-            note_count: members.len(),
+            label_anchor: cluster_label_anchor(tag_members, positions, radius),
+            note_count: tag_members.len(),
             geometry,
             influence_radius: radius,
         });
     }
-    clusters.sort_by(|left, right| left.key.cmp(&right.key));
-
-    let edges = resolved_edges(index, &positions);
-    let content_bounds = layout_bounds(&positions, &clusters);
-    BoardLayout {
-        positions,
-        clusters,
-        edges,
-        stats: LayoutStats {
-            connectivity_passes,
-            fallback_cluster_count: fallback_tags.len(),
-            maximum_influence_radius: radii.values().copied().fold(0.0, f32::max),
-            sampled_field_cells: sampled_cells,
-            field_step: sample_step,
-        },
-        fingerprints,
-        content_bounds,
-    }
+    (clusters, sampled_cells)
 }
 
-fn cluster_names(
-    notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
-) -> BTreeMap<String, String> {
+fn cluster_label_anchor(
+    members: &[NoteId],
+    positions: &HashMap<NoteId, Pos2>,
+    radius: f32,
+) -> Pos2 {
+    let anchor_member = members
+        .iter()
+        .min_by(|left, right| {
+            positions[*left]
+                .y
+                .total_cmp(&positions[*right].y)
+                .then_with(|| positions[*left].x.total_cmp(&positions[*right].x))
+                .then_with(|| left.cmp(right))
+        })
+        .expect("clusters always have members");
+    positions[anchor_member]
+        + Vec2::new(
+            -CARD_SIZE.x * 0.5 + 12.0,
+            -CARD_SIZE.y * 0.5 - radius * 0.35,
+        )
+}
+
+fn member_positions(members: &[NoteId], positions: &HashMap<NoteId, Pos2>) -> Vec<Pos2> {
+    members.iter().map(|note_id| positions[note_id]).collect()
+}
+
+fn cluster_names(notes: &[&NoteRecord], note_tags: &NoteTags) -> BTreeMap<String, String> {
     let mut names = BTreeMap::new();
     for note in notes {
         for (key, name) in &note_tags[&note.id] {
@@ -257,11 +341,8 @@ fn cluster_names(
     names
 }
 
-fn cluster_members(
-    notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
-) -> BTreeMap<String, Vec<NoteId>> {
-    let mut members: BTreeMap<String, Vec<NoteId>> = BTreeMap::new();
+fn cluster_members(notes: &[&NoteRecord], note_tags: &NoteTags) -> ClusterMembers {
+    let mut members: ClusterMembers = BTreeMap::new();
     for note in notes {
         for (key, _) in &note_tags[&note.id] {
             members
@@ -273,11 +354,8 @@ fn cluster_members(
     members
 }
 
-fn tag_relationship_weights(
-    notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
-) -> BTreeMap<(String, String), u32> {
-    let mut weights = BTreeMap::new();
+fn tag_relationship_weights(notes: &[&NoteRecord], note_tags: &NoteTags) -> TagWeights {
+    let mut weights = TagWeights::new();
     for note in notes {
         let tags: Vec<_> = note_tags[&note.id].iter().map(|(key, _)| key).collect();
         for left_index in 0..tags.len() {
@@ -311,72 +389,47 @@ fn tag_relationship_weights(
     weights
 }
 
-fn add_tag_weight(
-    weights: &mut BTreeMap<(String, String), u32>,
-    left: &str,
-    right: &str,
-    weight: u32,
-) {
-    let key = if left <= right {
+fn add_tag_weight(weights: &mut TagWeights, left: &str, right: &str, weight: u32) {
+    *weights.entry(weight_key(left, right)).or_default() += weight;
+}
+
+fn weight_key(left: &str, right: &str) -> (String, String) {
+    if left <= right {
         (left.to_owned(), right.to_owned())
     } else {
         (right.to_owned(), left.to_owned())
-    };
-    *weights.entry(key).or_default() += weight;
+    }
 }
 
 fn tag_centers(
-    members: &BTreeMap<String, Vec<NoteId>>,
-    weights: &BTreeMap<(String, String), u32>,
-    seed: Option<&LayoutSeed>,
-    unchanged: &HashSet<NoteId>,
+    members: &ClusterMembers,
+    weights: &TagWeights,
+    seeding: &Seeding<'_>,
 ) -> HashMap<String, Pos2> {
-    if seed.is_none() {
+    if !seeding.is_warm() {
         return cold_side_by_side_centers(members, weights);
     }
 
     let stride = (GRID_SPACING.x * 2.0, GRID_SPACING.y * 2.0);
     let mut centers = BTreeMap::new();
     let mut occupied = HashSet::new();
-    if let Some(seed) = seed {
-        for (tag, tag_members) in members {
-            let mut preserved: Vec<_> = tag_members
-                .iter()
-                .filter(|note_id| unchanged.contains(*note_id))
-                .filter_map(|note_id| seed.positions.get(note_id).copied())
-                .collect();
-            if preserved.is_empty() {
-                continue;
-            }
-            preserved.sort_by(|left, right| {
-                left.x
-                    .total_cmp(&right.x)
-                    .then_with(|| left.y.total_cmp(&right.y))
-            });
-            let x = median(preserved.iter().map(|position| position.x).collect());
-            let y = median(preserved.iter().map(|position| position.y).collect());
-            let center = Pos2::new(x, y);
-            occupied.insert(coarse_slot(center, stride));
-            centers.insert(tag.clone(), center);
+    for (tag, tag_members) in members {
+        let preserved: Vec<_> = tag_members
+            .iter()
+            .filter_map(|note_id| seeding.preserved_position(note_id))
+            .collect();
+        if preserved.is_empty() {
+            continue;
         }
+        let center = Pos2::new(
+            median(preserved.iter().map(|position| position.x).collect()),
+            median(preserved.iter().map(|position| position.y).collect()),
+        );
+        occupied.insert(coarse_slot(center, stride));
+        centers.insert(tag.clone(), center);
     }
 
-    let all_tags: BTreeSet<_> = members.keys().cloned().collect();
-    while centers.len() < all_tags.len() {
-        let next = all_tags
-            .iter()
-            .filter(|tag| !centers.contains_key(*tag))
-            .max_by(|left, right| {
-                placed_weight(left, &centers, weights)
-                    .cmp(&placed_weight(right, &centers, weights))
-                    .then_with(|| members[*left].len().cmp(&members[*right].len()))
-                    .then_with(|| {
-                        weighted_degree(left, weights).cmp(&weighted_degree(right, weights))
-                    })
-                    .then_with(|| right.cmp(left))
-            })
-            .expect("an unplaced tag exists")
-            .clone();
+    while let Some(next) = next_tag_by_affinity(members, &centers, weights) {
         let related: Vec<_> = centers
             .iter()
             .filter_map(|(tag, position)| {
@@ -404,8 +457,8 @@ fn tag_centers(
 }
 
 fn cold_side_by_side_centers(
-    members: &BTreeMap<String, Vec<NoteId>>,
-    weights: &BTreeMap<(String, String), u32>,
+    members: &ClusterMembers,
+    weights: &TagWeights,
 ) -> HashMap<String, Pos2> {
     let order = relationship_order(members, weights);
     let side_lengths: BTreeMap<_, _> = members
@@ -471,31 +524,32 @@ fn compact_side_length(member_count: usize) -> i32 {
     if side % 2 == 0 { side + 1 } else { side }
 }
 
-fn relationship_order(
-    members: &BTreeMap<String, Vec<NoteId>>,
-    weights: &BTreeMap<(String, String), u32>,
-) -> Vec<String> {
+fn relationship_order(members: &ClusterMembers, weights: &TagWeights) -> Vec<String> {
     let mut order = Vec::with_capacity(members.len());
     let mut placed = BTreeMap::new();
-    while order.len() < members.len() {
-        let next = members
-            .keys()
-            .filter(|tag| !placed.contains_key(*tag))
-            .max_by(|left, right| {
-                placed_weight(left, &placed, weights)
-                    .cmp(&placed_weight(right, &placed, weights))
-                    .then_with(|| members[*left].len().cmp(&members[*right].len()))
-                    .then_with(|| {
-                        weighted_degree(left, weights).cmp(&weighted_degree(right, weights))
-                    })
-                    .then_with(|| right.cmp(left))
-            })
-            .expect("an unplaced tag exists")
-            .clone();
+    while let Some(next) = next_tag_by_affinity(members, &placed, weights) {
         placed.insert(next.clone(), Pos2::ZERO);
         order.push(next);
     }
     order
+}
+
+fn next_tag_by_affinity(
+    members: &ClusterMembers,
+    placed: &BTreeMap<String, Pos2>,
+    weights: &TagWeights,
+) -> Option<String> {
+    members
+        .keys()
+        .filter(|tag| !placed.contains_key(*tag))
+        .max_by(|left, right| {
+            placed_weight(left, placed, weights)
+                .cmp(&placed_weight(right, placed, weights))
+                .then_with(|| members[*left].len().cmp(&members[*right].len()))
+                .then_with(|| weighted_degree(left, weights).cmp(&weighted_degree(right, weights)))
+                .then_with(|| right.cmp(left))
+        })
+        .cloned()
 }
 
 fn median(mut values: Vec<f32>) -> f32 {
@@ -508,34 +562,25 @@ fn median(mut values: Vec<f32>) -> f32 {
     }
 }
 
-fn placed_weight(
-    tag: &str,
-    centers: &BTreeMap<String, Pos2>,
-    weights: &BTreeMap<(String, String), u32>,
-) -> u32 {
+fn placed_weight(tag: &str, centers: &BTreeMap<String, Pos2>, weights: &TagWeights) -> u32 {
     centers
         .keys()
         .map(|placed| tag_weight(tag, placed, weights))
         .sum()
 }
 
-fn weighted_degree(tag: &str, weights: &BTreeMap<(String, String), u32>) -> u32 {
+fn weighted_degree(tag: &str, weights: &TagWeights) -> u32 {
     weights
         .iter()
         .filter_map(|((left, right), weight)| (left == tag || right == tag).then_some(*weight))
         .sum()
 }
 
-fn tag_weight(left: &str, right: &str, weights: &BTreeMap<(String, String), u32>) -> u32 {
+fn tag_weight(left: &str, right: &str, weights: &TagWeights) -> u32 {
     if left == right {
         return 0;
     }
-    let key = if left <= right {
-        (left.to_owned(), right.to_owned())
-    } else {
-        (right.to_owned(), left.to_owned())
-    };
-    weights.get(&key).copied().unwrap_or(0)
+    weights.get(&weight_key(left, right)).copied().unwrap_or(0)
 }
 
 fn coarse_slot(position: Pos2, stride: (f32, f32)) -> (i32, i32) {
@@ -547,17 +592,24 @@ fn coarse_slot(position: Pos2, stride: (f32, f32)) -> (i32, i32) {
 
 fn nearest_free_coarse_slot(desired: (i32, i32), occupied: &HashSet<(i32, i32)>) -> (i32, i32) {
     for radius in 0_i32.. {
-        let mut candidates = square_ring(desired, radius);
-        candidates.sort_by_key(|slot| {
-            let dx = slot.0 - desired.0;
-            let dy = slot.1 - desired.1;
-            (dx * dx + dy * dy, slot.1, slot.0)
-        });
-        if let Some(slot) = candidates.into_iter().find(|slot| !occupied.contains(slot)) {
+        if let Some(slot) = ring_by_distance(desired, radius)
+            .into_iter()
+            .find(|slot| !occupied.contains(slot))
+        {
             return slot;
         }
     }
     unreachable!("an infinite grid always contains a free slot")
+}
+
+fn ring_by_distance(origin: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
+    let mut slots = square_ring(origin, radius);
+    slots.sort_by_key(|slot| {
+        let dx = slot.0 - origin.0;
+        let dy = slot.1 - origin.1;
+        (dx * dx + dy * dy, slot.1, slot.0)
+    });
+    slots
 }
 
 fn square_ring(origin: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
@@ -578,30 +630,26 @@ fn square_ring(origin: (i32, i32), radius: i32) -> Vec<(i32, i32)> {
 
 fn desired_note_slots(
     notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
+    note_tags: &NoteTags,
     tag_centers: &HashMap<String, Pos2>,
-    seed: Option<&LayoutSeed>,
-    unchanged: &HashSet<NoteId>,
+    seeding: &Seeding<'_>,
 ) -> HashMap<NoteId, (i32, i32)> {
     let mut anchors = HashMap::new();
     for note in notes {
-        if unchanged.contains(&note.id)
-            && let Some(position) = seed.and_then(|seed| seed.positions.get(&note.id)).copied()
-        {
-            anchors.insert(note.id.clone(), position);
-            continue;
-        }
-        let tags = &note_tags[&note.id];
-        let sum = tags
-            .iter()
-            .fold(Vec2::ZERO, |sum, (tag, _)| sum + tag_centers[tag].to_vec2());
-        anchors.insert(note.id.clone(), Pos2::ZERO + sum / tags.len() as f32);
+        let anchor = seeding.preserved_position(&note.id).unwrap_or_else(|| {
+            let tags = &note_tags[&note.id];
+            let sum = tags
+                .iter()
+                .fold(Vec2::ZERO, |sum, (tag, _)| sum + tag_centers[tag].to_vec2());
+            Pos2::ZERO + sum / tags.len() as f32
+        });
+        anchors.insert(note.id.clone(), anchor);
     }
 
     notes
         .iter()
         .map(|note| {
-            if unchanged.contains(&note.id) {
+            if seeding.is_unchanged(&note.id) {
                 return (note.id.clone(), position_slot(anchors[&note.id]));
             }
             let neighbors: BTreeSet<_> = note
@@ -625,9 +673,9 @@ fn desired_note_slots(
 
 fn spread_shared_anchors(
     notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
+    note_tags: &NoteTags,
     mut desired: HashMap<NoteId, (i32, i32)>,
-    unchanged: &HashSet<NoteId>,
+    seeding: &Seeding<'_>,
 ) -> HashMap<NoteId, (i32, i32)> {
     let mut groups: BTreeMap<(i32, i32), Vec<&NoteRecord>> = BTreeMap::new();
     for note in notes {
@@ -639,7 +687,7 @@ fn spread_shared_anchors(
         }
         let mut movable: Vec<_> = group
             .into_iter()
-            .filter(|note| !unchanged.contains(&note.id))
+            .filter(|note| !seeding.is_unchanged(&note.id))
             .collect();
         movable.sort_by(|left, right| {
             let left_degree = left.references.len() + left.backlinks.len();
@@ -652,7 +700,7 @@ fn spread_shared_anchors(
         });
         let reserve_center = desired
             .iter()
-            .any(|(id, slot)| unchanged.contains(id) && *slot == anchor);
+            .any(|(id, slot)| seeding.is_unchanged(id) && *slot == anchor);
         for (index, note) in movable.into_iter().enumerate() {
             let offset = compact_offset(index + usize::from(reserve_center));
             desired.insert(note.id.clone(), (anchor.0 + offset.0, anchor.1 + offset.1));
@@ -667,11 +715,7 @@ fn compact_offset(index: usize) -> (i32, i32) {
     }
     let mut remaining = index;
     for radius in 1_i32.. {
-        let mut ring = square_ring((0, 0), radius);
-        ring.sort_by_key(|slot| {
-            let distance = slot.0 * slot.0 + slot.1 * slot.1;
-            (distance, slot.1, slot.0)
-        });
+        let ring = ring_by_distance((0, 0), radius);
         if remaining <= ring.len() {
             return ring[remaining - 1];
         }
@@ -683,7 +727,7 @@ fn compact_offset(index: usize) -> (i32, i32) {
 fn pack_rows(
     notes: &[&NoteRecord],
     desired: &HashMap<NoteId, (i32, i32)>,
-    weights: &HashMap<NoteId, f64>,
+    seeding: &Seeding<'_>,
 ) -> HashMap<NoteId, (i32, i32)> {
     let mut rows: BTreeMap<i32, Vec<&NoteRecord>> = BTreeMap::new();
     for note in notes {
@@ -695,12 +739,16 @@ fn pack_rows(
             desired[&left.id]
                 .0
                 .cmp(&desired[&right.id].0)
-                .then_with(|| weights[&right.id].total_cmp(&weights[&left.id]))
+                .then_with(|| {
+                    seeding
+                        .weight(&right.id)
+                        .total_cmp(&seeding.weight(&left.id))
+                })
                 .then_with(|| note_sort_key(left).cmp(&note_sort_key(right)))
         });
         let mut blocks: Vec<IsotonicBlock> = Vec::new();
         for (index, note) in row_notes.iter().enumerate() {
-            let weight = weights[&note.id];
+            let weight = seeding.weight(&note.id);
             let q = desired[&note.id].0 as f64 - index as f64;
             blocks.push(IsotonicBlock {
                 start: index,
@@ -757,17 +805,14 @@ impl IsotonicBlock {
 
 fn refine_connectivity(
     notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
+    members: &ClusterMembers,
     initial: HashMap<NoteId, Pos2>,
     desired: &HashMap<NoteId, Pos2>,
-    seed: Option<&LayoutSeed>,
-    unchanged: &HashSet<NoteId>,
-    weights: &HashMap<NoteId, f64>,
+    seeding: &Seeding<'_>,
 ) -> (HashMap<NoteId, Pos2>, usize) {
-    let members = cluster_members(notes, note_tags);
     let mut current = initial;
     let mut best = current.clone();
-    let mut best_score = layout_score(&best, &members, desired, seed, unchanged);
+    let mut best_score = layout_score(&best, members, desired, seeding);
     let mut stalled = 0;
     let mut passes = 0;
 
@@ -780,7 +825,7 @@ fn refine_connectivity(
                 continue;
             }
             disconnected = true;
-            let root_index = root_component(&components, unchanged);
+            let root_index = root_component(&components, seeding);
             let root = &components[root_index];
             let root_buckets = TagBucketIndex::new(root, &current);
             for (index, component) in components.iter().enumerate() {
@@ -816,9 +861,9 @@ fn refine_connectivity(
                 (slot.0 + request.0.signum(), slot.1 + request.1.signum()),
             );
         }
-        current = slots_to_positions(pack_rows(notes, &proposed, weights));
+        current = slots_to_positions(pack_rows(notes, &proposed, seeding));
         passes = pass + 1;
-        let score = layout_score(&current, &members, desired, seed, unchanged);
+        let score = layout_score(&current, members, desired, seeding);
         if score < best_score {
             best_score = score;
             best.clone_from(&current);
@@ -867,10 +912,9 @@ impl Ord for LayoutScore {
 
 fn layout_score(
     positions: &HashMap<NoteId, Pos2>,
-    members: &BTreeMap<String, Vec<NoteId>>,
+    members: &ClusterMembers,
     desired: &HashMap<NoteId, Pos2>,
-    seed: Option<&LayoutSeed>,
-    unchanged: &HashSet<NoteId>,
+    seeding: &Seeding<'_>,
 ) -> LayoutScore {
     let disconnected_components = members
         .values()
@@ -882,14 +926,12 @@ fn layout_score(
         .sum();
     let mut note_ids: Vec<_> = positions.keys().collect();
     note_ids.sort();
-    let preserved_displacement = seed.map_or(0.0, |seed| {
-        note_ids
-            .iter()
-            .copied()
-            .filter(|note_id| unchanged.contains(*note_id))
-            .filter_map(|note_id| Some(positions[note_id].distance(*seed.positions.get(note_id)?)))
-            .sum()
-    });
+    let preserved_displacement = note_ids
+        .iter()
+        .filter_map(|note_id| {
+            Some(positions[*note_id].distance(seeding.preserved_position(note_id)?))
+        })
+        .sum();
     let desired_displacement = note_ids
         .iter()
         .map(|note_id| positions[*note_id].distance(desired[*note_id]))
@@ -940,20 +982,19 @@ fn connected_components(members: &[NoteId], positions: &HashMap<NoteId, Pos2>) -
     components
 }
 
-fn root_component(components: &[Vec<NoteId>], unchanged: &HashSet<NoteId>) -> usize {
+fn root_component(components: &[Vec<NoteId>], seeding: &Seeding<'_>) -> usize {
+    let unchanged_count = |component: &Vec<NoteId>| {
+        component
+            .iter()
+            .filter(|note_id| seeding.is_unchanged(note_id))
+            .count()
+    };
     components
         .iter()
         .enumerate()
         .max_by(|(_, left), (_, right)| {
-            left.iter()
-                .filter(|note_id| unchanged.contains(*note_id))
-                .count()
-                .cmp(
-                    &right
-                        .iter()
-                        .filter(|note_id| unchanged.contains(*note_id))
-                        .count(),
-                )
+            unchanged_count(left)
+                .cmp(&unchanged_count(right))
                 .then_with(|| left.len().cmp(&right.len()))
                 .then_with(|| right[0].cmp(&left[0]))
         })
@@ -1062,22 +1103,19 @@ fn minimum_spanning_radius(positions: &[Pos2]) -> f32 {
 }
 
 fn cluster_radii(
-    members: &BTreeMap<String, Vec<NoteId>>,
+    members: &ClusterMembers,
     positions: &HashMap<NoteId, Pos2>,
 ) -> (BTreeMap<String, f32>, BTreeSet<String>) {
     let mut radii = BTreeMap::new();
     let mut fallback_tags = BTreeSet::new();
     for (tag, tag_members) in members {
-        let components = connected_components(tag_members, positions);
-        let radius = if components.len() <= 1 {
+        let connected = connected_components(tag_members, positions).len() <= 1;
+        let radius = if connected {
             BASE_INFLUENCE_RADIUS
         } else {
             fallback_tags.insert(tag.clone());
-            let member_positions: Vec<_> = tag_members
-                .iter()
-                .map(|note_id| positions[note_id])
-                .collect();
-            minimum_spanning_radius(&member_positions).max(BASE_INFLUENCE_RADIUS)
+            minimum_spanning_radius(&member_positions(tag_members, positions))
+                .max(BASE_INFLUENCE_RADIUS)
         };
         radii.insert(tag.clone(), radius);
     }
@@ -1086,8 +1124,8 @@ fn cluster_radii(
 
 fn separate_foreign_notes(
     notes: &[&NoteRecord],
-    note_tags: &HashMap<NoteId, Vec<(String, String)>>,
-    members: &BTreeMap<String, Vec<NoteId>>,
+    note_tags: &NoteTags,
+    members: &ClusterMembers,
     radii: &BTreeMap<String, f32>,
     fallback_tags: &BTreeSet<String>,
     positions: &mut HashMap<NoteId, Pos2>,
@@ -1125,29 +1163,25 @@ fn separate_foreign_notes(
 
         let current = position_slot(positions[&note.id]);
         let mut destination = None;
-        for radius in 1_i32..=32 {
-            let mut candidates = square_ring(current, radius);
-            candidates.sort_by_key(|slot| {
-                let dx = slot.0 - current.0;
-                let dy = slot.1 - current.1;
-                (dx * dx + dy * dy, slot.1, slot.0)
-            });
-            destination = candidates.into_iter().find(|candidate| {
-                !occupied.contains(candidate)
-                    && preserves_own_tag_proximity(
-                        &note.id, *candidate, &own_tags, members, positions,
-                    )
-                    && members.keys().all(|tag| {
-                        own_tags.contains(tag.as_str())
-                            || !tag_field_contains(
-                                tag,
-                                slot_position(*candidate),
-                                members,
-                                radii,
-                                positions,
-                            )
-                    })
-            });
+        for radius in 1_i32..=MAX_SEPARATION_RADIUS {
+            destination = ring_by_distance(current, radius)
+                .into_iter()
+                .find(|candidate| {
+                    !occupied.contains(candidate)
+                        && preserves_own_tag_proximity(
+                            &note.id, *candidate, &own_tags, members, positions,
+                        )
+                        && members.keys().all(|tag| {
+                            own_tags.contains(tag.as_str())
+                                || !tag_field_contains(
+                                    tag,
+                                    slot_position(*candidate),
+                                    members,
+                                    radii,
+                                    positions,
+                                )
+                        })
+                });
             if destination.is_some() {
                 break;
             }

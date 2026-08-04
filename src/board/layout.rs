@@ -5,7 +5,7 @@ use eframe::egui::{Pos2, Rect};
 use super::{CARD_SIZE, metaballs::ClusterGeometry};
 use crate::vault::{NoteId, VaultIndex};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct BoardLayout {
     pub(super) positions: HashMap<NoteId, Pos2>,
     pub(super) clusters: Vec<ClusterRegion>,

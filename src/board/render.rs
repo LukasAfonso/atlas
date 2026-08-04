@@ -15,6 +15,11 @@ pub(super) const READABLE_TITLE_FONT_SIZE: f32 = 14.0;
 const NOTE_BADGE_SIZE: f32 = 34.0;
 const NOTE_EYEBROW_FONT_SIZE: f32 = 12.0;
 const NOTE_HEADER_GAP: f32 = NOTE_HEADER_RESERVED_HEIGHT - NOTE_BADGE_SIZE;
+const NOTE_HEADER_MIN_HEIGHT: f32 = 120.0;
+const FOOTER_RESERVE: f32 = 30.0;
+const MIN_FOOTER_FONT_SIZE: f32 = 8.0;
+const OUTER_SHADOW: Color32 = Color32::from_rgba_unmultiplied_const(47, 66, 53, 20);
+const INNER_SHADOW: Color32 = Color32::from_rgba_unmultiplied_const(47, 66, 53, 16);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NotePaintOptions {
@@ -167,137 +172,188 @@ impl BoardState {
         let mut painter = painter.clone();
         painter.set_opacity(options.opacity);
         let accent = note_color(note);
+        let scale = self.camera.scale;
+
         if level == DetailLevel::Markers {
-            painter.circle_filled(
-                rect.center(),
-                if options.selected { 6.5 } else { 4.5 },
-                accent,
-            );
-            if options.selected {
-                painter.circle_stroke(rect.center(), 8.0, Stroke::new(2.0, Color32::WHITE));
-            }
+            paint_note_marker(&painter, rect.center(), accent, options.selected);
             return None;
         }
+        paint_note_chrome(&painter, rect, accent, scale, options);
 
-        let fill = if options.selected {
-            theme::PAPER
-        } else {
-            theme::PAPER_STRONG
-        };
-        let corner_radius = (9.0 * self.camera.scale).clamp(9.0, 18.0);
-        let shadow_offset = (3.0 * self.camera.scale).clamp(3.0, 8.0);
-        let shadow_rect = rect.translate(Vec2::new(0.0, shadow_offset));
-        painter.rect_filled(
-            shadow_rect.expand(2.0),
-            corner_radius + 2.0,
-            Color32::from_rgba_unmultiplied(47, 66, 53, 20),
-        );
-        painter.rect_filled(
-            rect.translate(Vec2::new(0.0, shadow_offset * 0.35)),
-            corner_radius,
-            Color32::from_rgba_unmultiplied(47, 66, 53, 16),
-        );
-        painter.rect_filled(rect, corner_radius, fill);
-        let accent_width = (4.0 * self.camera.scale).clamp(3.0, 6.0);
-        painter.rect_filled(
-            Rect::from_min_max(rect.min, Pos2::new(rect.min.x + accent_width, rect.max.y)),
-            corner_radius,
-            accent,
-        );
-        if !options.snapped {
-            painter.rect_stroke(
-                rect,
-                corner_radius,
-                Stroke::new(
-                    if options.selected { 2.0 } else { 1.0 },
-                    if options.selected {
-                        theme::SAGE
-                    } else {
-                        theme::LINE
-                    },
-                ),
-                StrokeKind::Inside,
-            );
-        }
-
-        let padding = note_padding(level, self.camera.scale);
+        let padding = note_padding(level, scale);
         let font_sizes = font_sizes(level, options.typography_scale);
-        let clip_padding = Vec2::new(
-            padding.x.min(rect.width() / 4.0),
-            padding.y.min(rect.height() / 4.0),
-        );
-        let content_painter = painter.with_clip_rect(Rect::from_min_max(
-            rect.min + clip_padding,
-            rect.max - clip_padding,
-        ));
-        let show_header = level == DetailLevel::Content && rect.height() > 120.0;
+        let content_painter = clipped_content_painter(&painter, rect, padding);
         let title_offset = paint_note_eyebrow(
             &content_painter,
             rect,
             padding,
             accent,
             font_sizes.metadata.max(NOTE_EYEBROW_FONT_SIZE),
-            show_header,
+            level == DetailLevel::Content && rect.height() > NOTE_HEADER_MIN_HEIGHT,
         );
-        let title_galley = content_painter.layout(
-            note.title.clone(),
-            FontId::proportional(font_sizes.title),
-            theme::INK,
-            (rect.width() - padding.x * 2.0).max(1.0),
-        );
-        let title_position = note_title_position(
+        let title_bottom = paint_note_title(
+            &content_painter,
+            note,
             rect,
             padding,
+            font_sizes.title,
             level,
             title_offset,
-            title_lod_progress(self.camera.scale),
+            title_lod_progress(scale),
         );
-        paint_bold_galley(&content_painter, title_position, title_galley.clone());
 
-        let mut relationship_counts = None;
-        if level == DetailLevel::Content {
-            let title_bottom = title_position.y + title_galley.size().y;
-            let body_top = title_bottom + (font_sizes.title * 0.55).clamp(8.0, 16.0);
-            let footer_visible = note_footer_visible(rect, options.show_body);
-            let footer_reserve = if footer_visible { 30.0 } else { 0.0 };
-            let body_bottom = rect.bottom() - padding.y - footer_reserve;
-            if options.show_body
-                && let Some(body_rect) = note_body_rect(rect, padding.x, body_top, body_bottom)
-            {
-                let galley = self.markdown_cache.card_galley(
-                    &painter,
-                    note,
-                    options.body_typography_scale,
-                    body_rect.width(),
-                    painter.ctx().pixels_per_point(),
-                );
-                let body_scroll = options
-                    .body_scroll
-                    .min((galley.size().y - body_rect.height()).max(0.0));
-                if options.snapped {
-                    self.snapped_scroll = body_scroll;
-                }
-                content_painter.with_clip_rect(body_rect).galley(
-                    body_rect.min - Vec2::new(0.0, body_scroll),
-                    galley,
-                    theme::INK,
-                );
-            }
-
-            if footer_visible {
-                relationship_counts = Some(paint_note_footer(
-                    &content_painter,
-                    rect,
-                    padding,
-                    note,
-                    accent,
-                    font_sizes.metadata.max(8.0),
-                    font_sizes.counts.max(8.0),
-                ));
-            }
+        if level != DetailLevel::Content {
+            return None;
         }
-        relationship_counts
+
+        let footer_visible = note_footer_visible(rect, options.show_body);
+        let body_top = title_bottom + (font_sizes.title * 0.55).clamp(8.0, 16.0);
+        let body_bottom =
+            rect.bottom() - padding.y - if footer_visible { FOOTER_RESERVE } else { 0.0 };
+        if options.show_body
+            && let Some(body_rect) = note_body_rect(rect, padding.x, body_top, body_bottom)
+        {
+            self.paint_note_body(&painter, &content_painter, note, body_rect, options);
+        }
+
+        footer_visible.then(|| {
+            paint_note_footer(
+                &content_painter,
+                rect,
+                padding,
+                note,
+                accent,
+                font_sizes.metadata.max(MIN_FOOTER_FONT_SIZE),
+                font_sizes.counts.max(MIN_FOOTER_FONT_SIZE),
+            )
+        })
     }
+
+    fn paint_note_body(
+        &mut self,
+        painter: &eframe::egui::Painter,
+        content_painter: &eframe::egui::Painter,
+        note: &NoteRecord,
+        body_rect: Rect,
+        options: NotePaintOptions,
+    ) {
+        let galley = self.markdown_cache.card_galley(
+            painter,
+            note,
+            options.body_typography_scale,
+            body_rect.width(),
+            painter.ctx().pixels_per_point(),
+        );
+        let body_scroll = options
+            .body_scroll
+            .min((galley.size().y - body_rect.height()).max(0.0));
+        if options.snapped {
+            self.snapped_scroll = body_scroll;
+        }
+        content_painter.with_clip_rect(body_rect).galley(
+            body_rect.min - Vec2::new(0.0, body_scroll),
+            galley,
+            theme::INK,
+        );
+    }
+}
+
+fn paint_note_marker(
+    painter: &eframe::egui::Painter,
+    center: Pos2,
+    accent: Color32,
+    selected: bool,
+) {
+    painter.circle_filled(center, if selected { 6.5 } else { 4.5 }, accent);
+    if selected {
+        painter.circle_stroke(center, 8.0, Stroke::new(2.0, Color32::WHITE));
+    }
+}
+
+fn paint_note_chrome(
+    painter: &eframe::egui::Painter,
+    rect: Rect,
+    accent: Color32,
+    scale: f32,
+    options: NotePaintOptions,
+) {
+    let corner_radius = (9.0 * scale).clamp(9.0, 18.0);
+    let shadow_offset = (3.0 * scale).clamp(3.0, 8.0);
+    painter.rect_filled(
+        rect.translate(Vec2::new(0.0, shadow_offset)).expand(2.0),
+        corner_radius + 2.0,
+        OUTER_SHADOW,
+    );
+    painter.rect_filled(
+        rect.translate(Vec2::new(0.0, shadow_offset * 0.35)),
+        corner_radius,
+        INNER_SHADOW,
+    );
+    painter.rect_filled(
+        rect,
+        corner_radius,
+        if options.selected {
+            theme::PAPER
+        } else {
+            theme::PAPER_STRONG
+        },
+    );
+    let accent_width = (4.0 * scale).clamp(3.0, 6.0);
+    painter.rect_filled(
+        Rect::from_min_max(rect.min, Pos2::new(rect.min.x + accent_width, rect.max.y)),
+        corner_radius,
+        accent,
+    );
+    if !options.snapped {
+        let (width, color) = if options.selected {
+            (2.0, theme::SAGE)
+        } else {
+            (1.0, theme::LINE)
+        };
+        painter.rect_stroke(
+            rect,
+            corner_radius,
+            Stroke::new(width, color),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+fn clipped_content_painter(
+    painter: &eframe::egui::Painter,
+    rect: Rect,
+    padding: Vec2,
+) -> eframe::egui::Painter {
+    let clip_padding = Vec2::new(
+        padding.x.min(rect.width() / 4.0),
+        padding.y.min(rect.height() / 4.0),
+    );
+    painter.with_clip_rect(Rect::from_min_max(
+        rect.min + clip_padding,
+        rect.max - clip_padding,
+    ))
+}
+
+fn paint_note_title(
+    painter: &eframe::egui::Painter,
+    note: &NoteRecord,
+    rect: Rect,
+    padding: Vec2,
+    font_size: f32,
+    level: DetailLevel,
+    header_offset: f32,
+    title_progress: f32,
+) -> f32 {
+    let galley = painter.layout(
+        note.title.clone(),
+        FontId::proportional(font_size),
+        theme::INK,
+        (rect.width() - padding.x * 2.0).max(1.0),
+    );
+    let position = note_title_position(rect, padding, level, header_offset, title_progress);
+    let bottom = position.y + galley.size().y;
+    paint_bold_galley(painter, position, galley);
+    bottom
 }
 
 fn paint_bold_galley(painter: &eframe::egui::Painter, position: Pos2, galley: Arc<Galley>) {

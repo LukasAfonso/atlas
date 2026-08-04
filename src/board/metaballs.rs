@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use eframe::egui::{Pos2, Rect, Vec2};
 
@@ -43,132 +43,175 @@ pub(super) fn build_geometry(
     let Some(source_bounds) = field_bounds(positions, radius) else {
         return (Rect::NOTHING, ClusterGeometry::default(), 0);
     };
-    let bounds = source_bounds.expand(step);
-    let columns = ((bounds.width() / step).ceil() as usize).max(1) + 1;
-    let rows = ((bounds.height() / step).ceil() as usize).max(1) + 1;
-    let mut field = vec![0.0_f32; columns * rows];
-    let mut centers = vec![0.0_f32; columns.saturating_sub(1) * rows.saturating_sub(1)];
+    let field = ScalarField::sample(positions, radius, step, source_bounds);
+    let geometry = field.march();
+    (field.bounds, geometry, field.cell_count())
+}
 
-    for position in positions {
-        let card = Rect::from_center_size(*position, CARD_SIZE);
-        let influence = card.expand(radius);
-        let min_column = (((influence.left() - bounds.left()) / step).floor() as isize)
-            .clamp(0, columns as isize - 1) as usize;
-        let max_column = (((influence.right() - bounds.left()) / step).ceil() as isize)
-            .clamp(0, columns as isize - 1) as usize;
-        let min_row = (((influence.top() - bounds.top()) / step).floor() as isize)
-            .clamp(0, rows as isize - 1) as usize;
-        let max_row = (((influence.bottom() - bounds.top()) / step).ceil() as isize)
-            .clamp(0, rows as isize - 1) as usize;
+struct ScalarField {
+    bounds: Rect,
+    step: f32,
+    columns: usize,
+    rows: usize,
+    corners: Vec<f32>,
+    centers: Vec<f32>,
+}
 
-        for row in min_row..=max_row {
-            let y = bounds.top() + row as f32 * step;
-            for column in min_column..=max_column {
-                let x = bounds.left() + column as f32 * step;
-                let distance = distance_to_rect(Pos2::new(x, y), card);
-                if distance < radius {
-                    let normalized = 1.0 - distance / radius;
-                    field[row * columns + column] += normalized * normalized;
-                }
-            }
+impl ScalarField {
+    fn sample(positions: &[Pos2], radius: f32, step: f32, source_bounds: Rect) -> Self {
+        let bounds = source_bounds.expand(step);
+        let columns = ((bounds.width() / step).ceil() as usize).max(1) + 1;
+        let rows = ((bounds.height() / step).ceil() as usize).max(1) + 1;
+        let mut field = Self {
+            bounds,
+            step,
+            columns,
+            rows,
+            corners: vec![0.0; columns * rows],
+            centers: vec![0.0; columns.saturating_sub(1) * rows.saturating_sub(1)],
+        };
+
+        for position in positions {
+            let card = Rect::from_center_size(*position, CARD_SIZE);
+            field.accumulate_corners(card, radius);
+            field.accumulate_centers(card, radius);
         }
-        if columns > 1 && rows > 1 {
-            let min_center_column = min_column.saturating_sub(1);
-            let max_center_column = max_column.min(columns - 2);
-            let min_center_row = min_row.saturating_sub(1);
-            let max_center_row = max_row.min(rows - 2);
-            for row in min_center_row..=max_center_row {
-                let y = bounds.top() + (row as f32 + 0.5) * step;
-                for column in min_center_column..=max_center_column {
-                    let x = bounds.left() + (column as f32 + 0.5) * step;
-                    let distance = distance_to_rect(Pos2::new(x, y), card);
-                    if distance < radius {
-                        let normalized = 1.0 - distance / radius;
-                        centers[row * (columns - 1) + column] += normalized * normalized;
-                    }
-                }
-            }
+        field
+    }
+
+    fn accumulate_corners(&mut self, card: Rect, radius: f32) {
+        let (columns, step, bounds) = (self.columns, self.step, self.bounds);
+        for (column, row) in influenced_cells(card, radius, bounds, step, columns, self.rows, 0.0) {
+            let point = self.grid_position(column, row, 0.0);
+            self.corners[row * columns + column] += influence_at(point, card, radius);
         }
     }
 
-    let mut geometry = ClusterGeometry::default();
-    let mut boundary_edges: HashMap<EdgeKey, BoundaryEdge> = HashMap::new();
-    for row in 0..rows - 1 {
-        for column in 0..columns - 1 {
-            let top_left = Sample {
-                position: Pos2::new(
-                    bounds.left() + column as f32 * step,
-                    bounds.top() + row as f32 * step,
-                ),
-                value: field[row * columns + column],
-            };
-            let top_right = Sample {
-                position: top_left.position + Vec2::new(step, 0.0),
-                value: field[row * columns + column + 1],
-            };
-            let bottom_right = Sample {
-                position: top_left.position + Vec2::splat(step),
-                value: field[(row + 1) * columns + column + 1],
-            };
-            let bottom_left = Sample {
-                position: top_left.position + Vec2::new(0.0, step),
-                value: field[(row + 1) * columns + column],
-            };
-            let center = Sample {
-                position: top_left.position + Vec2::splat(step * 0.5),
-                value: centers[row * (columns - 1) + column],
-            };
-            for (left, right) in cell_contours(
-                [top_left, top_right, bottom_right, bottom_left],
-                center.value,
-            ) {
-                register_edge(left, right, &mut boundary_edges);
-            }
-            for triangle in [
-                [top_left, top_right, center],
-                [top_right, bottom_right, center],
-                [bottom_right, bottom_left, center],
-                [bottom_left, top_left, center],
-            ] {
-                let polygon = clip_triangle(triangle);
-                if polygon.len() < 3 {
-                    continue;
-                }
-                let first = geometry.vertices.len() as u32;
-                geometry.vertices.extend(polygon.iter().copied());
-                for offset in 1..polygon.len() - 1 {
-                    geometry.indices.extend([
-                        first,
-                        first + offset as u32,
-                        first + offset as u32 + 1,
-                    ]);
-                }
-            }
+    fn accumulate_centers(&mut self, card: Rect, radius: f32) {
+        if self.columns < 2 || self.rows < 2 {
+            return;
+        }
+        let (columns, step, bounds) = (self.columns - 1, self.step, self.bounds);
+        for (column, row) in
+            influenced_cells(card, radius, bounds, step, columns, self.rows - 1, 0.5)
+        {
+            let point = self.grid_position(column, row, 0.5);
+            self.centers[row * columns + column] += influence_at(point, card, radius);
         }
     }
 
-    let (contours, open_contour_count) = join_contours(boundary_edges);
-    geometry.contours = contours;
-    debug_assert_eq!(
-        open_contour_count, 0,
-        "marching squares emitted open chains"
-    );
-    debug_assert!(geometry.vertices.iter().all(|point| point.is_finite()));
-    debug_assert!(
+    fn grid_position(&self, column: usize, row: usize, offset: f32) -> Pos2 {
+        self.bounds.min + Vec2::new(column as f32 + offset, row as f32 + offset) * self.step
+    }
+
+    fn corner(&self, column: usize, row: usize) -> Sample {
+        Sample {
+            position: self.grid_position(column, row, 0.0),
+            value: self.corners[row * self.columns + column],
+        }
+    }
+
+    fn center(&self, column: usize, row: usize) -> Sample {
+        Sample {
+            position: self.grid_position(column, row, 0.5),
+            value: self.centers[row * (self.columns - 1) + column],
+        }
+    }
+
+    fn cell_count(&self) -> usize {
+        self.columns.saturating_sub(1) * self.rows.saturating_sub(1)
+    }
+
+    fn march(&self) -> ClusterGeometry {
+        let mut geometry = ClusterGeometry::default();
+        let mut boundary_edges = BTreeSet::new();
+
+        for row in 0..self.rows - 1 {
+            for column in 0..self.columns - 1 {
+                let corners = [
+                    self.corner(column, row),
+                    self.corner(column + 1, row),
+                    self.corner(column + 1, row + 1),
+                    self.corner(column, row + 1),
+                ];
+                let center = self.center(column, row);
+                for (left, right) in cell_contours(corners, center.value) {
+                    register_edge(left, right, &mut boundary_edges);
+                }
+                for [left, right] in [[0, 1], [1, 2], [2, 3], [3, 0]] {
+                    push_polygon(
+                        &mut geometry,
+                        clip_triangle([corners[left], corners[right], center]),
+                    );
+                }
+            }
+        }
+
+        let (contours, open_contour_count) = join_contours(boundary_edges);
+        geometry.contours = contours;
+        debug_assert_eq!(
+            open_contour_count, 0,
+            "marching squares emitted open chains"
+        );
+        debug_assert!(geometry.vertices.iter().all(|point| point.is_finite()));
+        debug_assert!(
+            geometry
+                .contours
+                .iter()
+                .flatten()
+                .all(|point| point.is_finite())
+        );
+        debug_assert!(
+            geometry
+                .indices
+                .iter()
+                .all(|index| (*index as usize) < geometry.vertices.len())
+        );
         geometry
-            .contours
-            .iter()
-            .flatten()
-            .all(|point| point.is_finite())
-    );
-    debug_assert!(
+    }
+}
+
+fn influenced_cells(
+    card: Rect,
+    radius: f32,
+    bounds: Rect,
+    step: f32,
+    columns: usize,
+    rows: usize,
+    offset: f32,
+) -> impl Iterator<Item = (usize, usize)> {
+    let influence = card.expand(radius);
+    let range = |low: f32, high: f32, origin: f32, count: usize| {
+        let last = count as isize - 1;
+        let min = (((low - origin) / step - offset).floor() as isize).clamp(0, last) as usize;
+        let max = (((high - origin) / step - offset).ceil() as isize).clamp(0, last) as usize;
+        min..=max
+    };
+    let column_range = range(influence.left(), influence.right(), bounds.left(), columns);
+    let row_range = range(influence.top(), influence.bottom(), bounds.top(), rows);
+    row_range.flat_map(move |row| column_range.clone().map(move |column| (column, row)))
+}
+
+fn influence_at(point: Pos2, card: Rect, radius: f32) -> f32 {
+    let distance = distance_to_rect(point, card);
+    if distance >= radius {
+        return 0.0;
+    }
+    let normalized = 1.0 - distance / radius;
+    normalized * normalized
+}
+
+fn push_polygon(geometry: &mut ClusterGeometry, polygon: Vec<Pos2>) {
+    if polygon.len() < 3 {
+        return;
+    }
+    let first = geometry.vertices.len() as u32;
+    geometry.vertices.extend(polygon.iter().copied());
+    for offset in 1..polygon.len() - 1 {
         geometry
             .indices
-            .iter()
-            .all(|index| (*index as usize) < geometry.vertices.len())
-    );
-    let cell_count = columns.saturating_sub(1) * rows.saturating_sub(1);
-    (bounds, geometry, cell_count)
+            .extend([first, first + offset as u32, first + offset as u32 + 1]);
+    }
 }
 
 pub(super) fn required_pair_radius(left: Pos2, right: Pos2) -> f32 {
@@ -196,15 +239,7 @@ pub(super) fn required_pair_radius(left: Pos2, right: Pos2) -> f32 {
 pub(super) fn field_value_at(positions: &[Pos2], radius: f32, point: Pos2) -> f32 {
     positions
         .iter()
-        .map(|position| {
-            let distance = distance_to_rect(point, Rect::from_center_size(*position, CARD_SIZE));
-            if distance >= radius {
-                0.0
-            } else {
-                let normalized = 1.0 - distance / radius;
-                normalized * normalized
-            }
-        })
+        .map(|position| influence_at(point, Rect::from_center_size(*position, CARD_SIZE), radius))
         .sum()
 }
 
@@ -317,41 +352,21 @@ impl EdgeKey {
     }
 }
 
-struct BoundaryEdge {
-    count: usize,
-    left: PointKey,
-    right: PointKey,
-}
-
-fn register_edge(left: Pos2, right: Pos2, edges: &mut HashMap<EdgeKey, BoundaryEdge>) {
-    let left_key = PointKey::new(left);
-    let right_key = PointKey::new(right);
-    if left_key == right_key {
-        return;
+fn register_edge(left: Pos2, right: Pos2, edges: &mut BTreeSet<EdgeKey>) {
+    let left = PointKey::new(left);
+    let right = PointKey::new(right);
+    if left != right {
+        edges.insert(EdgeKey::new(left, right));
     }
-    let key = EdgeKey::new(left_key, right_key);
-    edges
-        .entry(key)
-        .and_modify(|edge| edge.count += 1)
-        .or_insert(BoundaryEdge {
-            count: 1,
-            left: left_key,
-            right: right_key,
-        });
 }
 
-fn join_contours(edges: HashMap<EdgeKey, BoundaryEdge>) -> (Vec<Vec<Pos2>>, usize) {
-    let mut positions = BTreeMap::new();
+fn join_contours(edges: BTreeSet<EdgeKey>) -> (Vec<Vec<Pos2>>, usize) {
     let mut adjacency: BTreeMap<PointKey, BTreeSet<PointKey>> = BTreeMap::new();
-    let mut unused = BTreeSet::new();
-    for (key, edge) in edges {
-        let _duplicate_count = edge.count;
-        positions.insert(edge.left, edge.left.position());
-        positions.insert(edge.right, edge.right.position());
-        adjacency.entry(edge.left).or_default().insert(edge.right);
-        adjacency.entry(edge.right).or_default().insert(edge.left);
-        unused.insert(key);
+    for key in &edges {
+        adjacency.entry(key.0).or_default().insert(key.1);
+        adjacency.entry(key.1).or_default().insert(key.0);
     }
+    let mut unused = edges;
 
     let mut contours: Vec<Vec<Pos2>> = Vec::new();
     let mut open_contour_count = 0;
@@ -389,11 +404,7 @@ fn join_contours(edges: HashMap<EdgeKey, BoundaryEdge>) -> (Vec<Vec<Pos2>>, usiz
 
         if current == start && keys.len() >= 3 {
             canonicalize_loop(&mut keys);
-            contours.push(
-                keys.into_iter()
-                    .filter_map(|key| positions.get(&key).copied())
-                    .collect(),
-            );
+            contours.push(keys.into_iter().map(PointKey::position).collect());
         } else {
             open_contour_count += 1;
         }

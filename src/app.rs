@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -100,19 +101,19 @@ impl AtlasApp {
 
     fn render_vault_list(&self, ui: &mut egui::Ui) -> Vec<UiAction> {
         let mut actions = Vec::new();
+        let picking_folder = self.folder_picker_job.is_some();
+
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             render_brand(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if picking_folder {
+                    "Choosing…"
+                } else {
+                    "+ Add vault"
+                };
                 if ui
-                    .add_enabled(
-                        self.folder_picker_job.is_none(),
-                        primary_button(if self.folder_picker_job.is_some() {
-                            "Choosing…"
-                        } else {
-                            "+ Add vault"
-                        }),
-                    )
+                    .add_enabled(!picking_folder, primary_button(label))
                     .clicked()
                 {
                     actions.push(UiAction::AddVault);
@@ -128,69 +129,11 @@ impl AtlasApp {
         ui.add_space(16.0);
 
         if self.persisted.vaults.is_empty() {
-            surface_frame().show(ui, |ui| {
-                ui.set_min_height(150.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(32.0);
-                    ui.label(RichText::new("No vaults yet").size(17.0).strong());
-                    ui.label(
-                        RichText::new("Add a folder containing Markdown notes to begin.")
-                            .color(theme::MUTED),
-                    );
-                });
-            });
-        } else {
-            for path in &self.persisted.vaults {
-                let accessible = fs::read_dir(path).is_ok();
-                surface_frame().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        egui::Frame::new()
-                            .fill(if accessible {
-                                theme::SAGE_SOFT
-                            } else {
-                                Color32::from_rgb(239, 224, 220)
-                            })
-                            .corner_radius(10)
-                            .inner_margin(10)
-                            .show(ui, |ui| {
-                                ui.label(RichText::new("V").size(16.0).strong().color(
-                                    if accessible {
-                                        theme::SAGE_DARK
-                                    } else {
-                                        theme::ERROR
-                                    },
-                                ));
-                            });
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(vault_name(path)).size(15.0).strong());
-                            ui.label(
-                                RichText::new(path.display().to_string())
-                                    .small()
-                                    .color(theme::MUTED),
-                            );
-                            if accessible {
-                                ui.label(RichText::new("●  Available").small().color(theme::SAGE));
-                            } else {
-                                ui.label(
-                                    RichText::new("●  Unavailable").small().color(theme::ERROR),
-                                );
-                            }
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(quiet_button("Forget")).clicked() {
-                                actions.push(UiAction::ForgetVault(path.clone()));
-                            }
-                            if ui
-                                .add_enabled(accessible, egui::Button::new("Open").corner_radius(9))
-                                .clicked()
-                            {
-                                actions.push(UiAction::OpenVault(path.clone()));
-                            }
-                        });
-                    });
-                });
-                ui.add_space(9.0);
-            }
+            render_empty_vault_list(ui);
+        }
+        for path in &self.persisted.vaults {
+            actions.extend(render_vault_row(ui, path));
+            ui.add_space(9.0);
         }
         actions
     }
@@ -231,13 +174,11 @@ impl AtlasApp {
 
         surface_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                egui::Frame::new()
-                    .fill(theme::SAGE_DARK)
-                    .corner_radius(9)
-                    .inner_margin(8)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("A").strong().color(Color32::WHITE));
-                    });
+                badge(
+                    ui,
+                    theme::SAGE_DARK,
+                    RichText::new("A").strong().color(Color32::WHITE),
+                );
                 ui.vertical(|ui| {
                     ui.label(RichText::new(vault_name(&index.root)).size(15.0).strong());
                     ui.label(
@@ -245,20 +186,10 @@ impl AtlasApp {
                             .small()
                             .color(theme::MUTED),
                     );
-                    let (warnings, errors) = index.diagnostic_counts();
                     ui.label(
-                        RichText::new(format!(
-                            "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  scan {:.0} ms  ·  layout {:.0} ms",
-                            index.notes.len(),
-                            index.reference_count(),
-                            index.backlink_count(),
-                            index.unique_citation_count(),
-                            warnings + errors,
-                            index.scan_duration.as_secs_f64() * 1_000.0,
-                            board.layout_duration().as_secs_f64() * 1_000.0,
-                        ))
-                        .size(10.0)
-                        .color(theme::MUTED),
+                        RichText::new(vault_summary(index, board.layout_duration()))
+                            .size(10.0)
+                            .color(theme::MUTED),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -311,19 +242,7 @@ impl eframe::App for AtlasApp {
         let actions = egui::CentralPanel::default()
             .show(ui, |ui| {
                 if let Some((severity, message)) = &self.notice {
-                    let color = match severity {
-                        DiagnosticSeverity::Warning => theme::AMBER,
-                        DiagnosticSeverity::Error => theme::ERROR,
-                    };
-                    egui::Frame::new()
-                        .fill(theme::PAPER)
-                        .stroke(Stroke::new(1.0, color))
-                        .corner_radius(8)
-                        .inner_margin(10)
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(message).color(color));
-                        });
-                    ui.add_space(8.0);
+                    render_notice(ui, *severity, message);
                 }
 
                 match &self.screen {
@@ -354,6 +273,20 @@ impl Drop for AtlasApp {
     }
 }
 
+fn vault_summary(index: &VaultIndex, layout_duration: Duration) -> String {
+    let (warnings, errors) = index.diagnostic_counts();
+    format!(
+        "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  scan {:.0} ms  ·  layout {:.0} ms",
+        index.notes.len(),
+        index.reference_count(),
+        index.backlink_count(),
+        index.unique_citation_count(),
+        warnings + errors,
+        index.scan_duration.as_secs_f64() * 1_000.0,
+        layout_duration.as_secs_f64() * 1_000.0,
+    )
+}
+
 fn vault_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -362,16 +295,103 @@ fn vault_name(path: &Path) -> String {
         .to_owned()
 }
 
+fn render_notice(ui: &mut egui::Ui, severity: DiagnosticSeverity, message: &str) {
+    let color = match severity {
+        DiagnosticSeverity::Warning => theme::AMBER,
+        DiagnosticSeverity::Error => theme::ERROR,
+    };
+    egui::Frame::new()
+        .fill(theme::PAPER)
+        .stroke(Stroke::new(1.0, color))
+        .corner_radius(8)
+        .inner_margin(10)
+        .show(ui, |ui| {
+            ui.label(RichText::new(message).color(color));
+        });
+    ui.add_space(8.0);
+}
+
+fn render_empty_vault_list(ui: &mut egui::Ui) {
+    surface_frame().show(ui, |ui| {
+        ui.set_min_height(150.0);
+        ui.vertical_centered(|ui| {
+            ui.add_space(32.0);
+            ui.label(RichText::new("No vaults yet").size(17.0).strong());
+            ui.label(
+                RichText::new("Add a folder containing Markdown notes to begin.")
+                    .color(theme::MUTED),
+            );
+        });
+    });
+}
+
+fn render_vault_row(ui: &mut egui::Ui, path: &Path) -> Vec<UiAction> {
+    let accessible = fs::read_dir(path).is_ok();
+    let (badge_fill, accent, status) = if accessible {
+        (theme::SAGE_SOFT, theme::SAGE_DARK, "●  Available")
+    } else {
+        (
+            Color32::from_rgb(239, 224, 220),
+            theme::ERROR,
+            "●  Unavailable",
+        )
+    };
+
+    let mut actions = Vec::new();
+    surface_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            badge(
+                ui,
+                badge_fill,
+                RichText::new("V").size(16.0).strong().color(accent),
+            );
+            ui.vertical(|ui| {
+                ui.label(RichText::new(vault_name(path)).size(15.0).strong());
+                ui.label(
+                    RichText::new(path.display().to_string())
+                        .small()
+                        .color(theme::MUTED),
+                );
+                ui.label(RichText::new(status).small().color(if accessible {
+                    theme::SAGE
+                } else {
+                    theme::ERROR
+                }));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(quiet_button("Forget")).clicked() {
+                    actions.push(UiAction::ForgetVault(path.to_path_buf()));
+                }
+                if ui
+                    .add_enabled(accessible, egui::Button::new("Open").corner_radius(9))
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenVault(path.to_path_buf()));
+                }
+            });
+        });
+    });
+    actions
+}
+
+fn badge(ui: &mut egui::Ui, fill: Color32, text: RichText) {
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(10)
+        .inner_margin(9)
+        .show(ui, |ui| {
+            ui.label(text);
+        });
+}
+
 fn render_brand(ui: &mut egui::Ui) {
     surface_frame().show(ui, |ui| {
         ui.horizontal(|ui| {
-            egui::Frame::new()
-                .fill(theme::SAGE_DARK)
-                .corner_radius(10)
-                .inner_margin(9)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("A").size(18.0).strong().color(Color32::WHITE));
-                });
+            badge(
+                ui,
+                theme::SAGE_DARK,
+                RichText::new("A").size(18.0).strong().color(Color32::WHITE),
+            );
             ui.vertical(|ui| {
                 ui.label(RichText::new("Atlas").size(16.0).strong());
                 ui.label(

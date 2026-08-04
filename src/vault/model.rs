@@ -88,6 +88,10 @@ pub struct VaultIndex {
 }
 
 impl VaultIndex {
+    pub fn note(&self, note_id: &NoteId) -> Option<&NoteRecord> {
+        self.notes.iter().find(|note| &note.id == note_id)
+    }
+
     pub fn reference_count(&self) -> usize {
         self.notes.iter().map(|note| note.references.len()).sum()
     }
@@ -115,9 +119,4 @@ impl VaultIndex {
                 }
             })
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct VaultScanResult {
-    pub index: VaultIndex,
 }

@@ -5,7 +5,7 @@ mod scan;
 
 pub use model::{
     Diagnostic, DiagnosticSeverity, NoteId, NoteRecord, ParsedNote, ReferenceKind, ReferenceTarget,
-    VaultIndex, VaultScanResult,
+    VaultIndex,
 };
 pub use parser::parse_note;
 pub use resolve::resolve_graph;

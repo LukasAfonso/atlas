@@ -12,22 +12,11 @@ pub const CARD_BODY_FONT_WORLD: f32 = 3.7;
 const CARD_SCALE_STEPS: f32 = 64.0;
 const CARD_WRAP_RATIO_STEPS: f32 = 16.0;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum CacheLayout {
-    Card { scale: u16, wrap_ratio: u32 },
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct CacheKey {
     note_id: NoteId,
-    layout: CacheLayout,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct LayoutSpec {
-    cache_layout: CacheLayout,
-    wrap_width: f32,
-    base_font_size: f32,
+    scale: u16,
+    wrap_ratio: u32,
 }
 
 #[derive(Debug, Default)]
@@ -45,50 +34,33 @@ impl MarkdownCache {
         wrap_width: f32,
         pixels_per_point: f32,
     ) -> Arc<Galley> {
-        let scale_bucket = card_scale_bucket(scale);
-        let wrap_ratio_bucket = card_wrap_ratio_bucket(wrap_width, scale);
-        let layout_scale = f32::from(scale_bucket) / CARD_SCALE_STEPS;
-        let layout_wrap_ratio = wrap_ratio_bucket as f32 / CARD_WRAP_RATIO_STEPS;
-        self.galley(
-            painter,
-            note,
-            LayoutSpec {
-                cache_layout: CacheLayout::Card {
-                    scale: scale_bucket,
-                    wrap_ratio: wrap_ratio_bucket,
-                },
-                wrap_width: layout_wrap_ratio * layout_scale,
-                base_font_size: CARD_BODY_FONT_WORLD * layout_scale,
-            },
-            pixels_per_point,
-        )
-    }
-
-    fn galley(
-        &mut self,
-        painter: &egui::Painter,
-        note: &NoteRecord,
-        spec: LayoutSpec,
-        pixels_per_point: f32,
-    ) -> Arc<Galley> {
-        let pixels_key = pixels_per_point.to_bits();
-        if self.pixels_per_point != Some(pixels_key) {
-            self.galleys.clear();
-            self.pixels_per_point = Some(pixels_key);
-        }
+        self.invalidate_on_scaling_change(pixels_per_point);
 
         let key = CacheKey {
             note_id: note.id.clone(),
-            layout: spec.cache_layout,
+            scale: card_scale_bucket(scale),
+            wrap_ratio: card_wrap_ratio_bucket(wrap_width, scale),
         };
         if let Some(galley) = self.galleys.get(&key) {
             return Arc::clone(galley);
         }
 
-        let body = without_duplicate_title(&note.markdown_body, &note.title);
-        let galley = painter.layout_job(markdown_job(body, spec.wrap_width, spec.base_font_size));
+        let layout_scale = f32::from(key.scale) / CARD_SCALE_STEPS;
+        let galley = painter.layout_job(markdown_job(
+            without_duplicate_title(&note.markdown_body, &note.title),
+            key.wrap_ratio as f32 / CARD_WRAP_RATIO_STEPS * layout_scale,
+            CARD_BODY_FONT_WORLD * layout_scale,
+        ));
         self.galleys.insert(key, Arc::clone(&galley));
         galley
+    }
+
+    fn invalidate_on_scaling_change(&mut self, pixels_per_point: f32) {
+        let pixels_key = pixels_per_point.to_bits();
+        if self.pixels_per_point != Some(pixels_key) {
+            self.galleys.clear();
+            self.pixels_per_point = Some(pixels_key);
+        }
     }
 }
 

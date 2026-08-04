@@ -249,82 +249,67 @@ fn scan_wikilinks(text: &str) -> Vec<ReferenceTarget> {
     references
 }
 
-fn scan_tags(text: &str) -> Vec<String> {
-    let characters: Vec<(usize, char)> = text.char_indices().collect();
-    let mut tags = Vec::new();
-    for (position, (byte_index, character)) in characters.iter().enumerate() {
-        if *character != '#' {
-            continue;
-        }
-        let previous = position.checked_sub(1).map(|index| characters[index].1);
-        if previous
-            .is_some_and(|character| character.is_alphanumeric() || "_/-".contains(character))
-        {
-            continue;
-        }
-        let start = byte_index + character.len_utf8();
-        let mut end = start;
-        for (_, character) in characters.iter().skip(position + 1) {
-            if character.is_alphanumeric() || matches!(character, '_' | '-' | '/') {
-                end += character.len_utf8();
-            } else {
-                break;
+fn scan_sigil_tokens(
+    text: &str,
+    sigil: char,
+    attaches_to: fn(char) -> bool,
+    is_body: fn(char) -> bool,
+) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut previous = None;
+    for (index, character) in text.char_indices() {
+        if character == sigil && !previous.is_some_and(attaches_to) {
+            let start = index + character.len_utf8();
+            let end = text[start..]
+                .find(|character: char| !is_body(character))
+                .map_or(text.len(), |offset| start + offset);
+            if end > start {
+                tokens.push(&text[start..end]);
             }
         }
-        if end > start {
-            let tag = text[start..end].trim_matches('/');
-            if !tag.is_empty()
-                && tag
-                    .chars()
-                    .next()
-                    .is_some_and(|character| !character.is_ascii_digit())
-            {
-                tags.push(tag.to_owned());
-            }
-        }
+        previous = Some(character);
     }
-    tags
+    tokens
+}
+
+fn scan_tags(text: &str) -> Vec<String> {
+    scan_sigil_tokens(text, '#', is_tag_character, is_tag_character)
+        .into_iter()
+        .filter_map(|token| {
+            let tag = token.trim_matches('/');
+            let starts_with_digit = tag
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit());
+            (!tag.is_empty() && !starts_with_digit).then(|| tag.to_owned())
+        })
+        .collect()
+}
+
+fn is_tag_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '-' | '/')
 }
 
 fn scan_citations(text: &str) -> Vec<String> {
-    let characters: Vec<(usize, char)> = text.char_indices().collect();
-    let mut citations = Vec::new();
-    for (position, (byte_index, character)) in characters.iter().enumerate() {
-        if *character != '@' {
-            continue;
-        }
-        let previous = position.checked_sub(1).map(|index| characters[index].1);
-        if previous.is_some_and(|character| {
-            character.is_alphanumeric() || matches!(character, '_' | '.' | '+' | '-' | '%' | '/')
-        }) {
-            continue;
-        }
+    scan_sigil_tokens(text, '@', attaches_to_citation, is_citation_character)
+        .into_iter()
+        .filter_map(|token| {
+            let citation = token.trim_end_matches(['.', ':', '?']);
+            (!citation.is_empty()).then(|| citation.to_owned())
+        })
+        .collect()
+}
 
-        let start = byte_index + character.len_utf8();
-        let mut end = start;
-        for (_, character) in characters.iter().skip(position + 1) {
-            if character.is_alphanumeric()
-                || matches!(
-                    character,
-                    '_' | '-' | ':' | '.' | '/' | '+' | '?' | '$' | '%' | '&' | '~' | '#'
-                )
-            {
-                end += character.len_utf8();
-            } else {
-                break;
-            }
-        }
+fn attaches_to_citation(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '.' | '+' | '-' | '%' | '/')
+}
 
-        if end > start {
-            let citation = text[start..end]
-                .trim_end_matches(['.', ':', '?'])
-                .to_owned();
-            if !citation.is_empty() {
-                citations.push(citation);
-            }
-        }
-    }
-    citations
+fn is_citation_character(character: char) -> bool {
+    character.is_alphanumeric()
+        || matches!(
+            character,
+            '_' | '-' | ':' | '.' | '/' | '+' | '?' | '$' | '%' | '&' | '~' | '#'
+        )
 }
 
 fn deduplicate_strings(values: Vec<String>, strip_hash: bool) -> Vec<String> {

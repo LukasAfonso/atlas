@@ -18,6 +18,8 @@ use crate::{
     vault::{DiagnosticSeverity, VaultIndex, scan_vault},
 };
 
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 struct ScanEnvelope {
     generation: u64,
     index: VaultIndex,
@@ -56,17 +58,17 @@ impl AtlasApp {
         let preserve_view = seed.is_some();
 
         thread::spawn(move || {
-            let result = scan_vault(worker_root);
+            let index = scan_vault(worker_root);
             if worker_cancelled.load(Ordering::Acquire) {
                 return;
             }
             let layout_started = Instant::now();
-            let layout = prepare_board_layout(&result.index, seed.as_ref());
+            let layout = prepare_board_layout(&index, seed.as_ref());
             let layout_duration = layout_started.elapsed();
             if !worker_cancelled.load(Ordering::Acquire) {
                 let _ = sender.send(ScanEnvelope {
                     generation,
-                    index: result.index,
+                    index,
                     layout,
                     layout_duration,
                     preserve_view,
@@ -98,41 +100,38 @@ impl AtlasApp {
     }
 
     pub(super) fn poll_scan(&mut self, context: &egui::Context) {
-        let message = self.scan_job.as_ref().map(|job| job.receiver.try_recv());
+        let Some(update) = poll(self.scan_job.as_ref().map(|job| &job.receiver), context) else {
+            return;
+        };
+        self.scan_job = None;
 
-        match message {
-            Some(Ok(envelope)) => {
-                self.scan_job = None;
-                if is_current_generation(self.scan_generation, envelope.generation) {
-                    self.selected_note = retained_selection(
-                        self.selected_note.take(),
-                        &envelope.index,
-                        envelope.preserve_view,
-                    );
-                    self.board.install_layout(
-                        envelope.index.root.clone(),
-                        envelope.layout,
-                        envelope.preserve_view,
-                        envelope.layout_duration,
-                    );
-                    self.screen = AppScreen::Vault {
-                        index: envelope.index,
-                    };
-                }
+        match update {
+            JobUpdate::Finished(envelope) if envelope.generation == self.scan_generation => {
+                self.install_scan(envelope);
             }
-            Some(Err(TryRecvError::Disconnected)) => {
-                self.scan_job = None;
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    "The vault scan stopped unexpectedly".to_owned(),
-                ));
+            JobUpdate::Finished(_) => {}
+            JobUpdate::Lost => {
+                self.report_error("The vault scan stopped unexpectedly");
                 self.screen = AppScreen::VaultList;
             }
-            Some(Err(TryRecvError::Empty)) => {
-                context.request_repaint_after(Duration::from_millis(50));
-            }
-            None => {}
         }
+    }
+
+    fn install_scan(&mut self, envelope: ScanEnvelope) {
+        self.selected_note = envelope
+            .preserve_view
+            .then(|| self.selected_note.take())
+            .flatten()
+            .filter(|selected| envelope.index.note(selected).is_some());
+        self.board.install_layout(
+            envelope.index.root.clone(),
+            envelope.layout,
+            envelope.preserve_view,
+            envelope.layout_duration,
+        );
+        self.screen = AppScreen::Vault {
+            index: envelope.index,
+        };
     }
 
     pub(super) fn start_folder_picker(&mut self, context: &egui::Context) {
@@ -157,32 +156,26 @@ impl AtlasApp {
             DiagnosticSeverity::Warning,
             "Waiting for folder selection…".to_owned(),
         ));
-        context.request_repaint_after(Duration::from_millis(50));
+        context.request_repaint_after(POLL_INTERVAL);
     }
 
     pub(super) fn poll_folder_picker(&mut self, context: &egui::Context) {
-        let message = self
-            .folder_picker_job
-            .as_ref()
-            .map(|job| job.receiver.try_recv());
+        let Some(update) = poll(
+            self.folder_picker_job.as_ref().map(|job| &job.receiver),
+            context,
+        ) else {
+            return;
+        };
+        self.folder_picker_job = None;
 
-        match message {
-            Some(Ok(selected)) => {
-                self.folder_picker_job = None;
-                self.accept_selected_vault(selected, context);
-            }
-            Some(Err(TryRecvError::Disconnected)) => {
-                self.folder_picker_job = None;
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    "The folder picker stopped unexpectedly".to_owned(),
-                ));
-            }
-            Some(Err(TryRecvError::Empty)) => {
-                context.request_repaint_after(Duration::from_millis(50));
-            }
-            None => {}
+        match update {
+            JobUpdate::Finished(selected) => self.accept_selected_vault(selected, context),
+            JobUpdate::Lost => self.report_error("The folder picker stopped unexpectedly"),
         }
+    }
+
+    fn report_error(&mut self, message: impl Into<String>) {
+        self.notice = Some((DiagnosticSeverity::Error, message.into()));
     }
 
     fn accept_selected_vault(&mut self, selected: Option<PathBuf>, context: &egui::Context) {
@@ -198,45 +191,36 @@ impl AtlasApp {
                 self.start_scan(path, context, false);
             }
             Err(error) => {
-                self.notice = Some((
-                    DiagnosticSeverity::Error,
-                    format!("Could not add {}: {error}", selected.display()),
-                ));
+                self.report_error(format!("Could not add {}: {error}", selected.display()));
             }
         }
     }
 }
 
-fn is_current_generation(active: u64, incoming: u64) -> bool {
-    active == incoming
+enum JobUpdate<T> {
+    Finished(T),
+    Lost,
 }
 
-fn retained_selection(
-    selected: Option<crate::vault::NoteId>,
-    index: &VaultIndex,
-    preserve_view: bool,
-) -> Option<crate::vault::NoteId> {
-    preserve_view
-        .then_some(selected)
-        .flatten()
-        .filter(|selected| index.notes.iter().any(|note| note.id == *selected))
+fn poll<T>(receiver: Option<&Receiver<T>>, context: &egui::Context) -> Option<JobUpdate<T>> {
+    match receiver?.try_recv() {
+        Ok(value) => Some(JobUpdate::Finished(value)),
+        Err(TryRecvError::Disconnected) => Some(JobUpdate::Lost),
+        Err(TryRecvError::Empty) => {
+            context.request_repaint_after(POLL_INTERVAL);
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{is_current_generation, retained_selection};
     use crate::vault::{NoteId, NoteRecord, VaultIndex};
 
     #[test]
-    fn superseded_scan_generations_are_rejected() {
-        assert!(is_current_generation(4, 4));
-        assert!(!is_current_generation(5, 4));
-    }
-
-    #[test]
-    fn same_vault_selection_is_kept_only_while_the_note_exists() {
+    fn notes_are_looked_up_by_identifier() {
         let note_id = NoteId(PathBuf::from("kept.md"));
         let index = VaultIndex {
             notes: vec![NoteRecord {
@@ -253,14 +237,7 @@ mod tests {
             }],
             ..VaultIndex::default()
         };
-        assert_eq!(
-            retained_selection(Some(note_id.clone()), &index, true),
-            Some(note_id.clone())
-        );
-        assert_eq!(
-            retained_selection(Some(NoteId(PathBuf::from("deleted.md"))), &index, true),
-            None
-        );
-        assert_eq!(retained_selection(Some(note_id), &index, false), None);
+        assert!(index.note(&note_id).is_some());
+        assert!(index.note(&NoteId(PathBuf::from("deleted.md"))).is_none());
     }
 }
