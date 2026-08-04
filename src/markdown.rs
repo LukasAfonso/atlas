@@ -37,11 +37,6 @@ pub struct MarkdownCache {
 }
 
 impl MarkdownCache {
-    pub fn clear(&mut self) {
-        self.galleys.clear();
-        self.pixels_per_point = None;
-    }
-
     pub fn card_galley(
         &mut self,
         painter: &egui::Painter,

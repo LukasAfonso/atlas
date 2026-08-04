@@ -70,9 +70,13 @@ impl AtlasApp {
     fn apply_action(&mut self, action: UiAction, context: &egui::Context) {
         match action {
             UiAction::AddVault => self.start_folder_picker(context),
-            UiAction::OpenVault(path) | UiAction::Rescan(path) => {
+            UiAction::OpenVault(path) => {
                 self.notice = None;
-                self.start_scan(path, context);
+                self.start_scan(path, context, false);
+            }
+            UiAction::Rescan(path) => {
+                self.notice = None;
+                self.start_scan(path, context, true);
             }
             UiAction::ForgetVault(path) => {
                 self.persisted.forget(&path);
@@ -244,13 +248,14 @@ impl AtlasApp {
                     let (warnings, errors) = index.diagnostic_counts();
                     ui.label(
                         RichText::new(format!(
-                            "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  {:.0} ms",
+                            "{} notes  ·  {} references  ·  {} backlinks  ·  {} citations  ·  {} issues  ·  scan {:.0} ms  ·  layout {:.0} ms",
                             index.notes.len(),
                             index.reference_count(),
                             index.backlink_count(),
                             index.unique_citation_count(),
                             warnings + errors,
                             index.scan_duration.as_secs_f64() * 1_000.0,
+                            board.layout_duration().as_secs_f64() * 1_000.0,
                         ))
                         .size(10.0)
                         .color(theme::MUTED),

@@ -1,17 +1,32 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use eframe::egui::{self, Pos2, Rect, Sense, Vec2};
 
 mod inspector;
 mod layout;
+mod metaballs;
+mod placement;
 mod render;
 
 use crate::markdown::{CARD_BODY_FONT_WORLD, MarkdownCache};
 use crate::theme;
 use crate::vault::{NoteId, NoteRecord, VaultIndex};
 use inspector::paint_relationship_panel;
-use layout::{BoardEdge, ClusterRegion, clustered_layout, layout_bounds, resolved_edges};
+pub(crate) use layout::BoardLayout;
+#[cfg(test)]
+use layout::resolved_edges;
+use layout::{BoardEdge, ClusterRegion, LayoutSeed, LayoutStats, PlacementFingerprint};
+pub(crate) use placement::prepare_board_layout;
 use render::{NotePaintOptions, note_padding};
+
+#[cfg(test)]
+fn clustered_layout(index: &VaultIndex) -> BoardLayout {
+    prepare_board_layout(index, None)
+}
 #[cfg(test)]
 use render::{
     READABLE_TITLE_FONT_SIZE, font_sizes, note_body_rect, note_footer_visible, note_title_position,
@@ -93,6 +108,11 @@ pub struct BoardState {
     snapped_scroll: f32,
     relationship_panel_open: bool,
     markdown_cache: MarkdownCache,
+    layout_root: Option<PathBuf>,
+    fingerprints: HashMap<NoteId, PlacementFingerprint>,
+    layout_stats: LayoutStats,
+    layout_duration: Duration,
+    last_viewport: Option<Rect>,
     pub visible_notes: usize,
 }
 
@@ -110,6 +130,11 @@ impl Default for BoardState {
             snapped_scroll: 0.0,
             relationship_panel_open: false,
             markdown_cache: MarkdownCache::default(),
+            layout_root: None,
+            fingerprints: HashMap::new(),
+            layout_stats: LayoutStats::default(),
+            layout_duration: Duration::ZERO,
+            last_viewport: None,
             visible_notes: 0,
         }
     }
@@ -121,20 +146,76 @@ pub struct BoardOutput {
 }
 
 impl BoardState {
-    pub fn rebuild(&mut self, index: &VaultIndex) {
-        let layout = clustered_layout(index);
-        self.positions = layout.positions;
-        self.clusters = layout.clusters;
-        self.edges = resolved_edges(index, &self.positions);
-        self.content_bounds = layout_bounds(&self.positions, &self.clusters);
-        self.camera = Camera::default();
-        self.needs_fit = true;
+    pub(crate) fn layout_seed(&self, root: &Path) -> Option<LayoutSeed> {
+        (self.layout_root.as_deref() == Some(root)).then(|| LayoutSeed {
+            root: root.to_path_buf(),
+            positions: self.positions.clone(),
+            fingerprints: self.fingerprints.clone(),
+        })
+    }
+
+    pub(crate) fn install_layout(
+        &mut self,
+        root: PathBuf,
+        layout: BoardLayout,
+        preserve_view: bool,
+        layout_duration: Duration,
+    ) {
+        let visible_world = preserve_view.then(|| {
+            self.last_viewport.map(|viewport| {
+                Rect::from_two_pos(
+                    self.camera.screen_to_world(viewport.min, viewport),
+                    self.camera.screen_to_world(viewport.max, viewport),
+                )
+            })
+        });
+        let BoardLayout {
+            positions,
+            clusters,
+            edges,
+            stats,
+            fingerprints,
+            content_bounds,
+        } = layout;
+        let retired = (
+            std::mem::replace(&mut self.positions, positions),
+            std::mem::replace(&mut self.clusters, clusters),
+            std::mem::replace(&mut self.edges, edges),
+            std::mem::replace(&mut self.fingerprints, fingerprints),
+            std::mem::take(&mut self.markdown_cache),
+        );
+        self.content_bounds = content_bounds;
+        self.layout_stats = stats;
+        self.layout_duration = layout_duration;
+        self.layout_root = Some(root);
         self.click_origin = None;
         self.snapped_note = None;
         self.snapped_scroll = 0.0;
         self.relationship_panel_open = false;
-        self.markdown_cache.clear();
         self.visible_notes = 0;
+        if !retired.0.is_empty()
+            || !retired.1.is_empty()
+            || !retired.2.is_empty()
+            || !retired.3.is_empty()
+        {
+            std::thread::spawn(move || drop(retired));
+        }
+
+        if preserve_view {
+            self.needs_fit = match (visible_world.flatten(), self.content_bounds) {
+                (Some(visible), Some(content)) => !visible.intersects(content),
+                (None, Some(_)) => true,
+                (_, None) => false,
+            };
+        } else {
+            self.camera = Camera::default();
+            self.needs_fit = true;
+            self.last_viewport = None;
+        }
+    }
+
+    pub(crate) fn layout_duration(&self) -> Duration {
+        self.layout_duration
     }
 
     pub fn request_fit(&mut self) {
@@ -180,6 +261,7 @@ impl BoardState {
         };
         let response = response.on_hover_cursor(cursor);
         let viewport = response.rect;
+        self.last_viewport = Some(viewport);
 
         if self.needs_fit {
             self.fit_to_viewport(viewport);

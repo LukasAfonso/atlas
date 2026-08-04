@@ -1,14 +1,16 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use eframe::egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 
+use super::metaballs::{BASE_INFLUENCE_RADIUS, FIELD_CELL_BUDGET, build_geometry};
 use super::{
     CARD_SIZE, Camera, DetailLevel, FADE_START_THRESHOLD, GRID_SPACING, ISOLATION_THRESHOLD,
-    READABLE_TITLE_FONT_SIZE, SNAP_MAGNET_THRESHOLD, SNAP_THRESHOLD, body_typography_scale,
-    body_visible, card_width_ratio, clustered_layout, detail_level, font_sizes,
-    magnetized_note_rect, note_body_rect, note_footer_visible, note_padding, note_title_position,
-    note_typography_scale, note_viewport_coverage, related_note_ids, resolved_edges,
-    snap_magnet_progress, title_card_size, toggled_selection, unrelated_opacity,
+    LayoutSeed, READABLE_TITLE_FONT_SIZE, SNAP_MAGNET_THRESHOLD, SNAP_THRESHOLD,
+    body_typography_scale, body_visible, card_width_ratio, clustered_layout, detail_level,
+    font_sizes, magnetized_note_rect, note_body_rect, note_footer_visible, note_padding,
+    note_title_position, note_typography_scale, note_viewport_coverage, prepare_board_layout,
+    related_note_ids, resolved_edges, snap_magnet_progress, title_card_size, toggled_selection,
+    unrelated_opacity,
 };
 use crate::markdown::CARD_BODY_FONT_WORLD;
 use crate::theme;
@@ -43,6 +45,29 @@ fn index(notes: Vec<NoteRecord>) -> VaultIndex {
         diagnostics: Vec::new(),
         scan_duration: std::time::Duration::ZERO,
     }
+}
+
+fn seed_from(layout: &super::BoardLayout, root: &str) -> LayoutSeed {
+    LayoutSeed {
+        root: PathBuf::from(root),
+        positions: layout.positions.clone(),
+        fingerprints: layout.fingerprints.clone(),
+    }
+}
+
+fn assert_no_card_overlaps(layout: &super::BoardLayout) {
+    let positions: Vec<_> = layout.positions.values().copied().collect();
+    for (index, left) in positions.iter().enumerate() {
+        let left = Rect::from_center_size(*left, CARD_SIZE);
+        for right in positions.iter().skip(index + 1) {
+            assert!(!left.intersects(Rect::from_center_size(*right, CARD_SIZE)));
+        }
+    }
+}
+
+fn install_cold_layout(board: &mut super::BoardState, index: &VaultIndex) {
+    let layout = prepare_board_layout(index, None);
+    board.install_layout(index.root.clone(), layout, false, std::time::Duration::ZERO);
 }
 
 fn pointer_input(screen: Rect, position: Pos2, pressed: bool) -> RawInput {
@@ -103,7 +128,21 @@ fn clustered_layout_is_rescan_stable_and_non_overlapping() {
     let first = clustered_layout(&index(notes));
     let second = clustered_layout(&index(reversed));
     assert_eq!(first.positions, second.positions);
-    assert_eq!(first.clusters, second.clusters);
+    assert_eq!(first.clusters.len(), second.clusters.len());
+    for (left, right) in first.clusters.iter().zip(&second.clusters) {
+        assert_eq!(left.key, right.key);
+        assert_eq!(left.name, right.name);
+        assert_eq!(left.bounds, right.bounds);
+        assert_eq!(left.label_anchor, right.label_anchor);
+        assert_eq!(left.note_count, right.note_count);
+        assert_eq!(left.influence_radius, right.influence_radius);
+        assert_eq!(left.geometry.vertices.len(), right.geometry.vertices.len());
+        assert_eq!(left.geometry.indices.len(), right.geometry.indices.len());
+        assert_eq!(left.geometry.contours.len(), right.geometry.contours.len());
+        assert_eq!(left.geometry.vertices, right.geometry.vertices);
+        assert_eq!(left.geometry.indices, right.geometry.indices);
+        assert_eq!(left.geometry.contours, right.geometry.contours);
+    }
     let values: Vec<_> = first.positions.values().collect();
     for (index, left) in values.iter().enumerate() {
         for right in values.iter().skip(index + 1) {
@@ -119,6 +158,261 @@ fn clustered_layout_is_rescan_stable_and_non_overlapping() {
             .collect::<Vec<_>>(),
         vec!["Untagged", "evidence", "methods"]
     );
+}
+
+#[test]
+fn row_packing_prevents_card_overlap_at_scale() {
+    for count in [10, 100, 1_000] {
+        let notes = (0..count)
+            .map(|note_index| tagged_note(&format!("Note {note_index:04}"), &["dense"]))
+            .collect();
+        let layout = clustered_layout(&index(notes));
+        assert_eq!(layout.positions.len(), count);
+        assert_no_card_overlaps(&layout);
+        assert!(layout.stats.connectivity_passes <= 32);
+    }
+}
+
+#[test]
+fn co_occurring_tags_are_closer_than_unrelated_tags() {
+    let layout = clustered_layout(&index(vec![
+        tagged_note("Shared 1", &["alpha", "beta"]),
+        tagged_note("Shared 2", &["alpha", "beta"]),
+        tagged_note("Gamma", &["gamma"]),
+        tagged_note("Delta", &["delta"]),
+    ]));
+    let center = |name| {
+        layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("named cluster")
+            .bounds
+            .center()
+    };
+    assert!(center("alpha").distance(center("beta")) < center("gamma").distance(center("delta")));
+}
+
+#[test]
+fn warm_rescans_preserve_unchanged_positions() {
+    let original = index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+        tagged_note("Bridge", &["alpha", "beta"]),
+    ]);
+    let cold = prepare_board_layout(&original, None);
+    let seed = seed_from(&cold, "/vault");
+    let unchanged = prepare_board_layout(&original, Some(&seed));
+    assert_eq!(cold.positions, unchanged.positions);
+
+    let mut added_index = original.clone();
+    added_index
+        .notes
+        .push(tagged_note("Unrelated", &["unrelated"]));
+    let added = prepare_board_layout(&added_index, Some(&seed));
+    for (note_id, position) in &cold.positions {
+        assert_eq!(added.positions[note_id], *position);
+    }
+
+    let mut deleted_index = original.clone();
+    deleted_index.notes.retain(|note| note.title != "Beta");
+    let deleted = prepare_board_layout(&deleted_index, Some(&seed));
+    for note in &deleted_index.notes {
+        assert_eq!(deleted.positions[&note.id], cold.positions[&note.id]);
+    }
+}
+
+#[test]
+fn same_vault_install_preserves_an_intersecting_camera() {
+    let vault = index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+    ]);
+    let cold = prepare_board_layout(&vault, None);
+    let mut board = super::BoardState::default();
+    board.install_layout(vault.root.clone(), cold, false, std::time::Duration::ZERO);
+    let focus = board.positions[&NoteId(PathBuf::from("Alpha.md"))];
+    board.camera = Camera {
+        center: focus,
+        scale: 0.75,
+    };
+    board.last_viewport = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1_000.0, 700.0)));
+    let seed = board.layout_seed(&vault.root).expect("same-root seed");
+    let warm = prepare_board_layout(&vault, Some(&seed));
+    board.install_layout(vault.root.clone(), warm, true, std::time::Duration::ZERO);
+
+    assert_eq!(board.camera.center, focus);
+    assert_eq!(board.camera.scale, 0.75);
+    assert!(!board.needs_fit);
+}
+
+#[test]
+fn changed_note_only_moves_the_affected_area_when_possible() {
+    let original = index(vec![
+        tagged_note("Alpha 1", &["alpha"]),
+        tagged_note("Alpha 2", &["alpha"]),
+        tagged_note("Stable", &["stable"]),
+    ]);
+    let cold = prepare_board_layout(&original, None);
+    let seed = seed_from(&cold, "/vault");
+    let mut edited = original.clone();
+    edited.notes[0].tags = vec!["changed".to_owned()];
+    let warm = prepare_board_layout(&edited, Some(&seed));
+    let stable = NoteId(PathBuf::from("Stable.md"));
+    assert_eq!(warm.positions[&stable], cold.positions[&stable]);
+}
+
+#[test]
+fn seeds_from_other_roots_are_ignored() {
+    let mut other_root = index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+    ]);
+    other_root.root = PathBuf::from("/other-vault");
+    let cold = prepare_board_layout(&other_root, None);
+    let mut wrong_seed = seed_from(&cold, "/vault");
+    wrong_seed.positions.insert(
+        NoteId(PathBuf::from("Alpha.md")),
+        Pos2::new(99_999.0, 99_999.0),
+    );
+    let rejected = prepare_board_layout(&other_root, Some(&wrong_seed));
+    assert_eq!(rejected, cold);
+}
+
+#[test]
+fn fallback_radius_growth_is_local_to_the_disconnected_tag() {
+    let vault = index(vec![
+        tagged_note("Alpha 1", &["alpha"]),
+        tagged_note("Alpha 2", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+    ]);
+    let cold = prepare_board_layout(&vault, None);
+    let mut seed = seed_from(&cold, "/vault");
+    seed.positions.insert(
+        NoteId(PathBuf::from("Alpha 1.md")),
+        Pos2::new(-10.0 * GRID_SPACING.x, 0.0),
+    );
+    seed.positions.insert(
+        NoteId(PathBuf::from("Alpha 2.md")),
+        Pos2::new(10.0 * GRID_SPACING.x, 0.0),
+    );
+    let layout = prepare_board_layout(&vault, Some(&seed));
+    let cluster = |name| {
+        layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("named cluster")
+    };
+    assert!(cluster("alpha").influence_radius > BASE_INFLUENCE_RADIUS);
+    assert_eq!(cluster("beta").influence_radius, BASE_INFLUENCE_RADIUS);
+    assert_eq!(layout.stats.fallback_cluster_count, 1);
+    assert_eq!(cluster("alpha").geometry.contours.len(), 1);
+}
+
+#[test]
+fn generated_meshes_are_finite_indexed_and_near_the_cell_budget() {
+    let notes = (0..1_000)
+        .map(|note_index| tagged_note(&format!("Note {note_index:04}"), &["dense"]))
+        .collect();
+    let layout = clustered_layout(&index(notes));
+    assert!(layout.stats.sampled_field_cells as f32 <= FIELD_CELL_BUDGET * 1.05);
+    for cluster in &layout.clusters {
+        assert!(
+            cluster
+                .geometry
+                .vertices
+                .iter()
+                .all(|vertex| vertex.is_finite())
+        );
+        assert!(
+            cluster
+                .geometry
+                .indices
+                .iter()
+                .all(|index| (*index as usize) < cluster.geometry.vertices.len())
+        );
+        assert_eq!(cluster.geometry.contours.len(), 1);
+    }
+}
+
+#[test]
+fn multi_tag_note_centers_are_inside_every_associated_mesh() {
+    let layout = clustered_layout(&index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+        tagged_note("Bridge", &["alpha", "beta"]),
+    ]));
+    let bridge = layout.positions[&NoteId(PathBuf::from("Bridge.md"))];
+    for name in ["alpha", "beta"] {
+        let cluster = layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("named cluster");
+        assert!(mesh_contains(&cluster.geometry, bridge));
+    }
+}
+
+fn mesh_contains(geometry: &super::metaballs::ClusterGeometry, point: Pos2) -> bool {
+    geometry.indices.chunks_exact(3).any(|indices| {
+        let [a, b, c] = [
+            geometry.vertices[indices[0] as usize],
+            geometry.vertices[indices[1] as usize],
+            geometry.vertices[indices[2] as usize],
+        ];
+        let sign = |left: Pos2, right: Pos2| {
+            (point.x - right.x) * (left.y - right.y) - (left.x - right.x) * (point.y - right.y)
+        };
+        let [ab, bc, ca] = [sign(a, b), sign(b, c), sign(c, a)];
+        (ab >= 0.0 && bc >= 0.0 && ca >= 0.0) || (ab <= 0.0 && bc <= 0.0 && ca <= 0.0)
+    })
+}
+
+#[test]
+#[ignore = "release-mode preparation benchmark"]
+fn benchmark_metaball_preparation() {
+    for memberships in [1, 3] {
+        for count in [100, 1_000, 5_000] {
+            let notes: Vec<_> = (0..count)
+                .map(|note_index| {
+                    let mut note = note(&format!("Note {note_index:05}"));
+                    note.tags = (0..memberships)
+                        .map(|offset| format!("tag-{}", (note_index + offset) % 17))
+                        .collect();
+                    note
+                })
+                .collect();
+            let vault = index(notes);
+            let started = Instant::now();
+            let cold = prepare_board_layout(&vault, None);
+            let cold_duration = started.elapsed();
+            let seed = seed_from(&cold, "/vault");
+            let mut edited = vault.clone();
+            edited.notes[0].tags.push("edited".to_owned());
+            let started = Instant::now();
+            let _warm = prepare_board_layout(&edited, Some(&seed));
+            let warm_duration = started.elapsed();
+            let positions: Vec<_> = cold.positions.values().copied().collect();
+            let started = Instant::now();
+            let (_, _, cells) =
+                build_geometry(&positions, BASE_INFLUENCE_RADIUS, cold.stats.field_step);
+            let field_duration = started.elapsed();
+            eprintln!(
+                "notes={count} memberships={memberships} cold_ms={:.1} warm_ms={:.1} field_ms={:.1} sampled_cells={} isolated_field_cells={cells} passes={}",
+                cold_duration.as_secs_f64() * 1_000.0,
+                warm_duration.as_secs_f64() * 1_000.0,
+                field_duration.as_secs_f64() * 1_000.0,
+                cold.stats.sampled_field_cells,
+                cold.stats.connectivity_passes,
+            );
+            assert!(cold.stats.sampled_field_cells as f32 <= FIELD_CELL_BUDGET);
+            if count == 1_000 {
+                assert!(cold_duration.as_secs_f64() < 1.0);
+                assert!(warm_duration.as_secs_f64() < 0.25);
+            }
+        }
+    }
 }
 
 #[test]
@@ -138,7 +432,7 @@ fn independent_cluster_regions_do_not_overlap() {
         .find(|cluster| cluster.name == "beta")
         .expect("beta cluster");
 
-    assert!(!alpha.bounds.intersects(beta.bounds));
+    assert!(!rects_overlap(alpha.bounds, beta.bounds));
 }
 
 #[test]
@@ -167,7 +461,7 @@ fn same_tag_notes_fill_a_compact_grid_before_expanding() {
 }
 
 #[test]
-fn multi_tag_notes_are_positioned_between_cluster_centers() {
+fn multi_tag_notes_contribute_to_each_connected_cluster() {
     let layout = clustered_layout(&index(vec![
         tagged_note("Alpha", &["alpha"]),
         tagged_note("Beta", &["beta"]),
@@ -184,13 +478,92 @@ fn multi_tag_notes_are_positioned_between_cluster_centers() {
         .find(|cluster| cluster.name == "beta")
         .expect("beta cluster");
     let bridge = layout.positions[&NoteId(PathBuf::from("Bridge.md"))];
-    let minimum_x = alpha.center.x.min(beta.center.x);
-    let maximum_x = alpha.center.x.max(beta.center.x);
-
-    assert!(bridge.x >= minimum_x && bridge.x <= maximum_x);
     assert!(alpha.bounds.contains(bridge));
     assert!(beta.bounds.contains(bridge));
-    assert!(alpha.bounds.intersects(beta.bounds));
+    assert_eq!(alpha.note_count, 2);
+    assert_eq!(beta.note_count, 2);
+    assert_eq!(alpha.geometry.contours.len(), 1);
+    assert_eq!(beta.geometry.contours.len(), 1);
+}
+
+#[test]
+fn all_cluster_geometry_is_connected_with_intervening_tags() {
+    let notes = vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+        tagged_note("Gamma", &["gamma"]),
+        tagged_note("Delta", &["delta"]),
+        tagged_note("Epsilon", &["epsilon"]),
+        tagged_note("Alpha Gamma Bridge", &["alpha", "gamma"]),
+    ];
+    let layout = clustered_layout(&index(notes));
+
+    assert!(layout.stats.connectivity_passes <= 32);
+    for cluster in &layout.clusters {
+        assert_eq!(
+            cluster.geometry.contours.len(),
+            1,
+            "cluster {} is disconnected: notes={} radius={} bounds={:?} vertices={} indices={} step={}",
+            cluster.name,
+            cluster.note_count,
+            cluster.influence_radius,
+            cluster.bounds,
+            cluster.geometry.vertices.len(),
+            cluster.geometry.indices.len(),
+            layout.stats.field_step,
+        );
+    }
+}
+
+#[test]
+fn exact_normalized_and_nested_tags_are_distinct_memberships() {
+    let layout = clustered_layout(&index(vec![tagged_note(
+        "Tagged",
+        &["#Methods", " methods ", "methods/stats"],
+    )]));
+    assert_eq!(layout.clusters.len(), 2);
+    assert_eq!(
+        layout
+            .clusters
+            .iter()
+            .map(|cluster| cluster.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Methods", "methods/stats"]
+    );
+    let fingerprint = &layout.fingerprints[&NoteId(PathBuf::from("Tagged.md"))];
+    assert_eq!(fingerprint.tags, vec!["methods", "methods/stats"]);
+}
+
+#[test]
+fn visual_overlap_does_not_change_cluster_membership_counts() {
+    let layout = clustered_layout(&index(vec![
+        tagged_note("Alpha", &["alpha"]),
+        tagged_note("Beta", &["beta"]),
+        tagged_note("Gamma", &["gamma"]),
+        tagged_note("Alpha Beta Bridge", &["alpha", "beta"]),
+    ]));
+    let cluster = |name| {
+        layout
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == name)
+            .expect("named cluster")
+    };
+
+    assert_eq!(cluster("alpha").note_count, 2);
+    assert_eq!(cluster("beta").note_count, 2);
+    assert_eq!(cluster("gamma").note_count, 1);
+    assert!(
+        layout
+            .clusters
+            .iter()
+            .all(|cluster| cluster.geometry.contours.len() == 1)
+    );
+}
+
+fn rects_overlap(left: Rect, right: Rect) -> bool {
+    let overlap = left.intersect(right);
+    overlap.width() > f32::EPSILON && overlap.height() > f32::EPSILON
 }
 
 #[test]
@@ -504,7 +877,7 @@ fn snapping_keeps_the_camera_transform_and_zooming_out_restores_the_board() {
         scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
-    board.rebuild(&index);
+    install_cold_layout(&mut board, &index);
     board.needs_fit = false;
     board.select_note(Some(&selected_id));
     board.camera.scale = 1_000.0 * SNAP_THRESHOLD / CARD_SIZE.x;
@@ -553,7 +926,7 @@ fn clicking_a_note_emits_a_selection_request() {
         scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
-    board.rebuild(&index);
+    install_cold_layout(&mut board, &index);
     board.needs_fit = false;
 
     let context = eframe::egui::Context::default();
@@ -601,7 +974,7 @@ fn clicking_a_reference_in_the_side_panel_navigates_to_it() {
         scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
-    board.rebuild(&index);
+    install_cold_layout(&mut board, &index);
     board.needs_fit = false;
     board.select_note(Some(&source_id));
 
@@ -634,7 +1007,7 @@ fn snapped_relationship_counts_are_the_only_panel_trigger() {
         scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
-    board.rebuild(&index);
+    install_cold_layout(&mut board, &index);
     board.needs_fit = false;
     board.select_note(Some(&selected_id));
 
@@ -676,7 +1049,7 @@ fn magnetic_zoom_centers_and_snaps_a_note_without_selection() {
         scan_duration: std::time::Duration::ZERO,
     };
     let mut board = super::BoardState::default();
-    board.rebuild(&index);
+    install_cold_layout(&mut board, &index);
     board.needs_fit = false;
 
     let context = eframe::egui::Context::default();

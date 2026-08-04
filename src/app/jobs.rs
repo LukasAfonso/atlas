@@ -7,17 +7,23 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
 
 use super::{AppScreen, AtlasApp};
-use crate::vault::{DiagnosticSeverity, VaultScanResult, scan_vault};
+use crate::{
+    board::{BoardLayout, prepare_board_layout},
+    vault::{DiagnosticSeverity, VaultIndex, scan_vault},
+};
 
 struct ScanEnvelope {
     generation: u64,
-    result: VaultScanResult,
+    index: VaultIndex,
+    layout: BoardLayout,
+    layout_duration: Duration,
+    preserve_view: bool,
 }
 
 pub(super) struct ScanJob {
@@ -30,7 +36,12 @@ pub(super) struct FolderPickerJob {
 }
 
 impl AtlasApp {
-    pub(super) fn start_scan(&mut self, root: PathBuf, context: &egui::Context) {
+    pub(super) fn start_scan(
+        &mut self,
+        root: PathBuf,
+        context: &egui::Context,
+        preserve_current: bool,
+    ) {
         self.cancel_running_scan();
         self.scan_generation = self.scan_generation.wrapping_add(1);
         let generation = self.scan_generation;
@@ -39,16 +50,34 @@ impl AtlasApp {
         let (sender, receiver) = mpsc::channel();
         let worker_context = context.clone();
         let worker_root = root.clone();
+        let seed = preserve_current
+            .then(|| self.board.layout_seed(&root))
+            .flatten();
+        let preserve_view = seed.is_some();
 
         thread::spawn(move || {
             let result = scan_vault(worker_root);
+            if worker_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let layout_started = Instant::now();
+            let layout = prepare_board_layout(&result.index, seed.as_ref());
+            let layout_duration = layout_started.elapsed();
             if !worker_cancelled.load(Ordering::Acquire) {
-                let _ = sender.send(ScanEnvelope { generation, result });
+                let _ = sender.send(ScanEnvelope {
+                    generation,
+                    index: result.index,
+                    layout,
+                    layout_duration,
+                    preserve_view,
+                });
                 worker_context.request_repaint();
             }
         });
 
-        self.selected_note = None;
+        if !preserve_view {
+            self.selected_note = None;
+        }
         self.scan_job = Some(ScanJob {
             receiver,
             cancelled,
@@ -75,11 +104,20 @@ impl AtlasApp {
             Some(Ok(envelope)) => {
                 self.scan_job = None;
                 if is_current_generation(self.scan_generation, envelope.generation) {
-                    self.board.rebuild(&envelope.result.index);
+                    self.selected_note = retained_selection(
+                        self.selected_note.take(),
+                        &envelope.index,
+                        envelope.preserve_view,
+                    );
+                    self.board.install_layout(
+                        envelope.index.root.clone(),
+                        envelope.layout,
+                        envelope.preserve_view,
+                        envelope.layout_duration,
+                    );
                     self.screen = AppScreen::Vault {
-                        index: envelope.result.index,
+                        index: envelope.index,
                     };
-                    self.selected_note = None;
                 }
             }
             Some(Err(TryRecvError::Disconnected)) => {
@@ -157,7 +195,7 @@ impl AtlasApp {
             Ok(path) => {
                 self.persisted.register(path.clone());
                 self.notice = None;
-                self.start_scan(path, context);
+                self.start_scan(path, context, false);
             }
             Err(error) => {
                 self.notice = Some((
@@ -173,13 +211,56 @@ fn is_current_generation(active: u64, incoming: u64) -> bool {
     active == incoming
 }
 
+fn retained_selection(
+    selected: Option<crate::vault::NoteId>,
+    index: &VaultIndex,
+    preserve_view: bool,
+) -> Option<crate::vault::NoteId> {
+    preserve_view
+        .then_some(selected)
+        .flatten()
+        .filter(|selected| index.notes.iter().any(|note| note.id == *selected))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_current_generation;
+    use std::path::PathBuf;
+
+    use super::{is_current_generation, retained_selection};
+    use crate::vault::{NoteId, NoteRecord, VaultIndex};
 
     #[test]
     fn superseded_scan_generations_are_rejected() {
         assert!(is_current_generation(4, 4));
         assert!(!is_current_generation(5, 4));
+    }
+
+    #[test]
+    fn same_vault_selection_is_kept_only_while_the_note_exists() {
+        let note_id = NoteId(PathBuf::from("kept.md"));
+        let index = VaultIndex {
+            notes: vec![NoteRecord {
+                id: note_id.clone(),
+                relative_path: note_id.0.clone(),
+                title: "kept".to_owned(),
+                markdown_body: String::new(),
+                aliases: Vec::new(),
+                tags: Vec::new(),
+                references: Vec::new(),
+                backlinks: Vec::new(),
+                citations: Vec::new(),
+                diagnostics: Vec::new(),
+            }],
+            ..VaultIndex::default()
+        };
+        assert_eq!(
+            retained_selection(Some(note_id.clone()), &index, true),
+            Some(note_id.clone())
+        );
+        assert_eq!(
+            retained_selection(Some(NoteId(PathBuf::from("deleted.md"))), &index, true),
+            None
+        );
+        assert_eq!(retained_selection(Some(note_id), &index, false), None);
     }
 }

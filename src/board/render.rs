@@ -1,6 +1,9 @@
 use std::{collections::HashSet, sync::Arc};
 
-use eframe::egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Stroke, StrokeKind, Vec2};
+use eframe::egui::{
+    Align2, Color32, FontId, Galley, Pos2, Rect, Stroke, StrokeKind, Vec2,
+    epaint::{Mesh, PathShape, Vertex, WHITE_UV},
+};
 
 use super::{
     BoardState, DetailLevel, NOTE_HEADER_RESERVED_HEIGHT, NOTE_PADDING_WORLD, title_lod_progress,
@@ -52,21 +55,41 @@ impl BoardState {
                 continue;
             }
             let color = cluster_color(&cluster.key);
-            let radius = (18.0 * self.camera.scale).clamp(10.0, 28.0);
-            painter.rect_filled(
-                bounds,
-                radius,
-                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24),
+            let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
+            let mut mesh = Mesh::default();
+            mesh.vertices.reserve(cluster.geometry.vertices.len());
+            mesh.vertices
+                .extend(
+                    cluster
+                        .geometry
+                        .vertices
+                        .iter()
+                        .copied()
+                        .map(|position| Vertex {
+                            pos: self.camera.world_to_screen(position, viewport),
+                            uv: WHITE_UV,
+                            color: fill,
+                        }),
+                );
+            mesh.indices
+                .extend(cluster.geometry.indices.iter().copied());
+            painter.add(mesh);
+            let outline = Stroke::new(
+                1.5,
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 92),
             );
-            painter.rect_stroke(
-                bounds,
-                radius,
-                Stroke::new(
-                    1.5,
-                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 92),
-                ),
-                StrokeKind::Inside,
-            );
+            for contour in &cluster.geometry.contours {
+                if contour.len() >= 3 {
+                    painter.add(PathShape::closed_line(
+                        contour
+                            .iter()
+                            .copied()
+                            .map(|position| self.camera.world_to_screen(position, viewport))
+                            .collect(),
+                        outline,
+                    ));
+                }
+            }
 
             let label = if cluster.name == "Untagged" {
                 cluster.name.clone()
@@ -78,9 +101,10 @@ impl BoardState {
                 FontId::proportional(11.0),
                 Color32::WHITE,
             );
+            let natural_label = self.camera.world_to_screen(cluster.label_anchor, viewport);
             let label_position = Pos2::new(
-                (bounds.left() + 12.0).max(viewport.left() + 12.0),
-                (bounds.top() + 12.0).max(viewport.top() + 12.0),
+                natural_label.x.max(viewport.left() + 12.0),
+                natural_label.y.max(viewport.top() + 12.0),
             );
             let label_rect =
                 Rect::from_min_size(label_position, label.size()).expand2(Vec2::new(9.0, 6.0));
